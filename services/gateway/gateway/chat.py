@@ -8,6 +8,7 @@ just say source=chat. It never holds an upstream credential or an API key.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -24,6 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 from gateway import metrics
 from gateway.config import Settings
 from gateway.security import sign_token
+from gateway.upstreams import _leaf_exceptions
 
 log = logging.getLogger("gateway.chat")
 
@@ -84,6 +86,17 @@ def _clean_schema(schema: Any, defs: dict[str, Any] | None = None, depth: int = 
     return out or {"type": "string"}
 
 
+def _provider_message(resp: httpx.Response) -> str:
+    """The provider's own error text (e.g. a retired model name), never the request or key."""
+    try:
+        data = resp.json()
+        data = data[0] if isinstance(data, list) and data else data
+        message = str((data.get("error") or {}).get("message") or "")
+    except (ValueError, AttributeError):
+        message = ""
+    return (message or resp.reason_phrase)[:300]
+
+
 def _function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return {"type": "function", "function": {"name": name, "description": description[:1024], "parameters": parameters}}
 
@@ -108,6 +121,17 @@ def _search(tools: list[types.Tool], query: str, limit: int = 8) -> list[dict[st
 
 
 async def run_chat(settings: Settings, user_id: int, history: list[dict[str, str]]) -> dict[str, Any]:
+    try:
+        return await _run_chat(settings, user_id, history)
+    except BaseExceptionGroup as group:
+        # A ChatError raised inside the MCP client's task group arrives wrapped.
+        chat_error = next((e for e in _leaf_exceptions(group) if isinstance(e, ChatError)), None)
+        if chat_error is not None:
+            raise chat_error from None
+        raise
+
+
+async def _run_chat(settings: Settings, user_id: int, history: list[dict[str, str]]) -> dict[str, Any]:
     if not settings.llm_api_key:
         raise ChatError("The chat agent has no LLM API key. Set llm.apiKey in the gateway Secret.")
     token = sign_token("c", {"uid": user_id}, settings.session_secret, ttl_seconds=300)
@@ -165,21 +189,25 @@ async def _complete(llm: httpx.AsyncClient, settings: Settings, messages: list[d
     body: dict[str, Any] = {"model": settings.llm_model, "messages": messages}
     if functions:
         body.update(tools=functions, tool_choice="auto")
-    try:
-        resp = await llm.post(f"{settings.llm_base_url.rstrip('/')}/chat/completions", json=body, headers={"Authorization": f"Bearer {settings.llm_api_key}"})
-    except httpx.TimeoutException:
-        metrics.CHAT_TURNS.labels("llm_timeout").inc()
-        raise ChatError("The language model did not answer in time.") from None
-    except httpx.HTTPError as exc:
-        metrics.CHAT_TURNS.labels("llm_error").inc()
-        raise ChatError(f"Could not reach the language model ({type(exc).__name__}).") from None
+    for attempt in range(3):
+        try:
+            resp = await llm.post(f"{settings.llm_base_url.rstrip('/')}/chat/completions", json=body, headers={"Authorization": f"Bearer {settings.llm_api_key}"})
+        except httpx.TimeoutException:
+            metrics.CHAT_TURNS.labels("llm_timeout").inc()
+            raise ChatError("The language model did not answer in time.") from None
+        except httpx.HTTPError as exc:
+            metrics.CHAT_TURNS.labels("llm_error").inc()
+            raise ChatError(f"Could not reach the language model ({type(exc).__name__}).") from None
+        if resp.status_code not in (500, 502, 503) or attempt == 2:
+            break
+        await asyncio.sleep(2 * (attempt + 1))  # provider overload ("high demand") is usually brief
     if resp.status_code == 429:
         metrics.CHAT_TURNS.labels("llm_rate_limited").inc()
         raise ChatError("The language model's free-tier rate limit was reached. Wait a minute and try again.")
     if resp.status_code >= 400:
         metrics.CHAT_TURNS.labels("llm_error").inc()
-        log.warning("LLM HTTP %s: %s", resp.status_code, resp.text[:500])
-        raise ChatError(f"The language model returned HTTP {resp.status_code}.")
+        log.warning("LLM HTTP %s: %s", resp.status_code, " ".join(resp.text[:500].split()))
+        raise ChatError(f"The language model returned HTTP {resp.status_code}: {_provider_message(resp)}")
     choice = (resp.json().get("choices") or [{}])[0]
     message = choice.get("message") or {}
     message.setdefault("role", "assistant")

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # LLM for the chat agent: any OpenAI-compatible endpoint. Default is Gemini's.
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.8-flash"
     llm_api_key: str = ""
     llm_timeout_seconds: float = 60.0
     chat_max_steps: int = 8

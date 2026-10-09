@@ -66,6 +66,8 @@ llm_requests: list[dict] = []
 async def fake_completions(request: Request) -> JSONResponse:
     body = await request.json()
     llm_requests.append(body)
+    if body["model"] == "retired-model":  # Gemini's shape for a model that was withdrawn
+        return JSONResponse([{"error": {"code": 404, "message": "This model models/retired-model is no longer available to new users.", "status": "NOT_FOUND"}}], status_code=404)
     if body["messages"][-1]["role"] == "tool":
         return JSONResponse({"choices": [{"message": {"role": "assistant", "content": f"Result: {body['messages'][-1]['content']}"}}]})
     names = [t["function"]["name"] for t in body.get("tools", [])]
@@ -107,7 +109,7 @@ async def stack(tmp_path):
         if all(s["status"] == "connected" for s in servers):
             break
         await asyncio.sleep(0.2)
-    yield {"base": base, "admin": admin, "utils": utils, "ship": ship}
+    yield {"base": base, "admin": admin, "utils": utils, "ship": ship, "settings": settings}
     await admin.aclose()
     for s in (gw, llm, ship, utils):
         if s.task and not s.task.done():
@@ -221,3 +223,10 @@ async def test_csrf_header_required_for_dashboard_writes(stack):
     async with httpx.AsyncClient(base_url=stack["base"], cookies=cookies) as c:
         r = await c.post("/api/keys", json={"name": "x"})
         assert r.status_code == 403
+
+
+async def test_llm_error_reaches_the_user_readably(stack):
+    stack["settings"].llm_model = "retired-model"
+    r = await stack["admin"].post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 502
+    assert "HTTP 404" in r.json()["detail"] and "no longer available" in r.json()["detail"]

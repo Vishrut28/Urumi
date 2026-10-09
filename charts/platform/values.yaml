@@ -28,7 +28,7 @@ gateway:
   replicas: 2                     # stateless MCP transport: any replica serves any request
   llm:
     baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-2.5-flash
+    model: gemini-3.8-flash
   rateLimitPerMinute: 60
   healthIntervalSeconds: 10
   ssrfAllowedInternalHosts: "*.svc.cluster.local"

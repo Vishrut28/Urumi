@@ -95,7 +95,7 @@ client ─POST /mcp tools/call woocommerce__list_orders (Bearer mgw_…)─► T
 ## Chat agent
 
 `POST /api/chat` runs a bounded tool loop (8 steps) against an OpenAI-compatible
-chat-completions API. The default is Gemini 2.5 Flash through Google's
+chat-completions API. The default is Gemini 3.8 Flash (`gemini-3.8-flash`, free tier) through Google's
 OpenAI-compatible endpoint; the model, base URL and key are values plus a Secret.
 The agent is an **MCP client of the gateway's own `/mcp`**. It authenticates with
 a five-minute HMAC token bound to the logged-in user (`c.<payload>.<sig>`). So its
