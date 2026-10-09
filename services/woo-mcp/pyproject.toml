@@ -1,0 +1,14 @@
+[project]
+name = "woo-mcp"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp==2.3.0",
+    "httpx>=0.28,<1",
+    "uvicorn[standard]>=0.30",
+    "tzdata",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
