@@ -27,9 +27,10 @@ ensure_namespaces() {
 
 read_llm_key() {
   if [ -z "${GEMINI_API_KEY:-}" ] && [ -t 0 ]; then
-    read -r -s -p "Gemini API key (from https://aistudio.google.com/apikey; empty to skip): " GEMINI_API_KEY; echo
+    # Prompt and newline go to stderr: stdout is the key, captured by the caller.
+    read -r -s -p "Gemini API key (from https://aistudio.google.com/apikey; empty to skip): " GEMINI_API_KEY </dev/tty; echo >&2
   fi
-  printf '%s' "${GEMINI_API_KEY:-}"
+  printf '%s' "${GEMINI_API_KEY:-}" | tr -d '[:space:]'
 }
 
 create_store_secret() {
@@ -68,7 +69,9 @@ case "${1:-create}" in
     ;;
   set-llm-key)
     key=$(read_llm_key)
-    kubectl -n "$PLATFORM_NS" patch secret platform-secrets --type merge -p "{\"stringData\":{\"llm-api-key\":\"$key\"}}"
+    [ -n "$key" ] || { echo "no key entered; nothing changed" >&2; exit 1; }
+    # base64 in `data` keeps any character in the key from breaking the JSON patch.
+    kubectl -n "$PLATFORM_NS" patch secret platform-secrets --type merge -p "{\"data\":{\"llm-api-key\":\"$(printf '%s' "$key" | base64 -w0)\"}}"
     kubectl -n "$PLATFORM_NS" rollout restart deployment/gateway
     ;;
   *) echo "usage: $0 [create|set-llm-key]" >&2; exit 2 ;;
