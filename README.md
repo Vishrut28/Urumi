@@ -87,6 +87,16 @@ browser works too.
 If port 80 is taken, change the k3d port mapping (for example `8080:80`), and set
 `store.host`/`publicHost` to include the port.
 
+### WSL notes
+- **Keep an Ubuntu terminal open while you use the cluster.** WSL stops the distro
+  about a minute after the last session closes, which stops Docker and the k3d cluster.
+- If k3s crash-loops after WSL or Docker restarts (*"failed to find interface with
+  specified node ip"*), run `k3d cluster stop woo && k3d cluster start woo`.
+- The images and cluster need about 10 GB. If drive C: is short, move the distro
+  first: `wsl --shutdown; wsl --manage Ubuntu-24.04 --move D:\WSL\Ubuntu-24.04`.
+- The Gemini key can be added or changed later with `scripts/secrets.sh set-llm-key`.
+  It prompts without echoing and restarts the gateway.
+
 ---
 
 ## Using it
@@ -207,8 +217,32 @@ fake LLM over HTTP, then drives them with real MCP clients. It checks namespacin
 and collisions, that members can't see admin-only tools, key revocation, disabling
 a server, a dead upstream, audit attribution, and the chat loop acting as the user.
 
+### Smoke test against the running cluster
+
+```bash
+pip install mcp httpx && scripts/smoke-test.sh        # CHAT=1 scripts/smoke-test.sh also asks the chat agent
+```
+
+It goes through the public Ingress only. It signs in as the admin (user A), invites
+a member (user B) and issues keys. A creates a product over MCP and the test checks
+it's on the storefront. It checks out an order for it with Cash on Delivery through
+WooCommerce's Store API, then has B list today's orders through MCP and convert the
+total to EUR (a second upstream). It also checks that B can't see or call
+admin-only tools, disables a server and checks its tools disappear, revokes B's key
+(401), and checks the audit attribution.
+
+**Kill-pod check:** `kubectl -n platform scale deploy/utils-mcp --replicas=0`.
+Utilities shows **Unreachable — connection refused or no route to host** in the
+dashboard and its tools leave the list, while WooCommerce and Shipping calls keep
+working. Scale it back to 1 and it reconnects on the next health sweep.
+
+**NetworkPolicy check:** this command times out from `deploy/utils-mcp` and succeeds from `deploy/gateway`:
+`kubectl -n platform exec deploy/utils-mcp -- python -c "import urllib.request; urllib.request.urlopen('http://woo-mcp.store-main.svc.cluster.local:8000/healthz', timeout=5)"`
+
 ## How this was built
 
-Built with Claude Code (Claude Opus 5.5) working with me. I made the design
-decisions; the code, charts and docs were written in that collaboration and
-verified by the tests above and on a local k3d cluster.
+Built with Claude Code (Claude Opus 5.5) working with me. The code, charts and
+docs were written in that collaboration. They were verified by the unit and
+end-to-end tests above, and by the smoke test, kill-pod check and NetworkPolicy
+check on a local k3d cluster (k3s v1.35). The production values have not yet been
+run on a real VPS.
