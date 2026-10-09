@@ -1,0 +1,81 @@
+# One WooCommerce store and its MCP server. Everything a store needs lives in
+# the release namespace, so a store is created and deleted as one unit.
+
+store:
+  host: shop.localtest.me          # public storefront host (Ingress)
+  scheme: http                      # http locally, https behind cert-manager in prod
+  title: "Demo Store"
+  adminUser: storeadmin
+  adminEmail: admin@example.com
+  timezone: UTC
+  currency: USD
+  country: "US:CA"
+  sampleProducts: true
+  woocommerceVersion: "9.3.3"
+
+# Kubernetes Secret holding every store credential (created by scripts/secrets.sh
+# or by the provisioner). Keys: db-root-password, db-password, wp-admin-password,
+# wc-consumer-key, wc-consumer-secret, mcp-token.
+existingSecret: store-secrets
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""                  # cert-manager fills it when clusterIssuer is set
+    clusterIssuer: ""
+
+persistence:
+  storageClass: ""                  # "" = cluster default (local-path on k3s/k3d)
+  wordpressSize: 2Gi
+  databaseSize: 2Gi
+
+images:
+  wordpress: wordpress:6.6.2-php8.3-apache
+  wpcli: wordpress:cli-2.11.0-php8.3
+  mariadb: mariadb:11.4
+  wooMcp:
+    repository: woo-mcp
+    tag: dev
+    pullPolicy: IfNotPresent
+
+resources:
+  wordpress:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  mariadb:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 768Mi }
+  wooMcp:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 192Mi }
+  setup:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: kube-system   # where Traefik runs on k3s
+  gatewayNamespace: platform                # only the gateway's pods may call woo-mcp
+  gatewayPodLabels:
+    app.kubernetes.io/name: gateway
+
+# Per-namespace guardrails, used for provisioned stores.
+guardrails:
+  enabled: false
+  quota:
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    persistentvolumeclaims: "4"
+    requests.storage: 10Gi
+    pods: "10"
+  defaultLimits:
+    cpu: 500m
+    memory: 512Mi
+  defaultRequests:
+    cpu: 50m
+    memory: 64Mi

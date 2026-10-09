@@ -1,0 +1,7 @@
+MCP gateway platform in namespace {{ .Release.Namespace }}.
+
+Dashboard:         {{ include "platform.url" . }}/
+MCP endpoint:      {{ include "platform.url" . }}/mcp   (Authorization: Bearer <API key from the dashboard>)
+First admin:       kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.admin-email}' | base64 -d
+Admin password:    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.admin-password}' | base64 -d
+Metrics (internal): kubectl -n {{ .Release.Namespace }} port-forward svc/gateway 8080 && curl localhost:8080/metrics

@@ -1,0 +1,26 @@
+# Production-like VPS (k3s). Replace 203-0-113-10 with your VPS IP or use your own domain.
+publicHost: app.203-0-113-10.sslip.io
+scheme: https
+ingress:
+  className: traefik
+  tls:
+    enabled: true
+    secretName: platform-tls
+    clusterIssuer: letsencrypt-prod
+images:
+  registry: ghcr.io/vishrut28/
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+gateway:
+  replicas: 2
+  rateLimitPerMinute: 120
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  provisioner:
+    enabled: true
+    storeDomain: 203-0-113-10.sslip.io
+    storeScheme: https
+postgres:
+  storageClass: local-path
+  size: 10Gi

@@ -1,0 +1,162 @@
+# Idempotent store bootstrap with WP-CLI: installs WordPress and WooCommerce,
+# enables Cash on Delivery, and registers the REST API key woo-mcp uses. It runs
+# after install and after every upgrade, so changing store.host (local -> prod)
+# or rotating the API key in the Secret is applied by `helm upgrade`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: store-setup
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  setup.sh: |
+    #!/bin/sh
+    set -eu
+    cd /var/www/html
+    echo "waiting for WordPress files and the database..."
+    for i in $(seq 1 120); do
+      if [ -f wp-config.php ] && wp db query "SELECT 1" >/dev/null 2>&1; then break; fi
+      sleep 5
+    done
+    [ -f wp-config.php ] || { echo "wp-config.php never appeared"; exit 1; }
+
+    if ! wp core is-installed; then
+      wp core install --url="$STORE_URL" --title="$STORE_TITLE" --admin_user="$ADMIN_USER" \
+        --admin_password="$ADMIN_PASSWORD" --admin_email="$ADMIN_EMAIL" --skip-email
+    fi
+    # Follow the chart: the URL changes between local and prod, the password can rotate.
+    wp option update home "$STORE_URL"
+    wp option update siteurl "$STORE_URL"
+    wp option update blogname "$STORE_TITLE"
+    wp option update timezone_string "$STORE_TIMEZONE"
+    wp user update "$ADMIN_USER" --user_pass="$ADMIN_PASSWORD" --skip-email >/dev/null
+    wp rewrite structure '/%postname%/'
+
+    if ! wp plugin is-installed woocommerce; then
+      wp plugin install woocommerce --version="$WC_VERSION"
+    fi
+    wp plugin is-active woocommerce || wp plugin activate woocommerce
+
+    ADMIN_ID=$(wp user get "$ADMIN_USER" --field=ID); export ADMIN_ID
+    wp option update woocommerce_currency "$STORE_CURRENCY"
+    wp option update woocommerce_default_country "$STORE_COUNTRY"
+    wp option update woocommerce_coming_soon no            # new stores start in "coming soon" mode
+    wp option update woocommerce_store_pages_only no
+    wp option update woocommerce_ship_to_countries disabled # no shipping zones needed to check out
+    wp option update woocommerce_enable_guest_checkout yes
+    wp option update woocommerce_allow_tracking no
+    wp option update woocommerce_onboarding_profile '{"skipped":true}' --format=json
+    wp option update woocommerce_cod_settings '{"enabled":"yes","title":"Cash on delivery","description":"Pay with cash upon delivery.","instructions":"Pay with cash upon delivery.","enable_for_methods":[],"enable_for_virtual":"yes"}' --format=json
+    wp wc tool run install_pages --user="$ADMIN_ID" >/dev/null || true
+
+    # REST API key for woo-mcp, from the Secret. WooCommerce stores the consumer
+    # key as an HMAC (wc_api_hash) and the secret as-is; replace on rotation.
+    wp eval '
+      global $wpdb;
+      $table = $wpdb->prefix . "woocommerce_api_keys";
+      $hash = wc_api_hash( getenv( "WC_CONSUMER_KEY" ) );
+      $wpdb->query( $wpdb->prepare( "DELETE FROM $table WHERE description = %s AND consumer_key <> %s", "woo-mcp", $hash ) );
+      if ( ! $wpdb->get_var( $wpdb->prepare( "SELECT key_id FROM $table WHERE consumer_key = %s", $hash ) ) ) {
+        $wpdb->insert( $table, array(
+          "user_id" => (int) getenv( "ADMIN_ID" ), "description" => "woo-mcp", "permissions" => "read_write",
+          "consumer_key" => $hash, "consumer_secret" => getenv( "WC_CONSUMER_SECRET" ),
+          "truncated_key" => substr( getenv( "WC_CONSUMER_KEY" ), -7 ),
+        ) );
+        echo "registered woo-mcp REST API key\n";
+      }
+    '
+
+    if [ "$SAMPLE_PRODUCTS" = "true" ] && [ "$(wp wc product list --user="$ADMIN_ID" --format=count)" = "0" ]; then
+      wp wc product create --user="$ADMIN_ID" --name="Classic Tee" --regular_price=19.99 --status=publish --short_description="Soft cotton t-shirt." >/dev/null
+      wp wc product create --user="$ADMIN_ID" --name="Coffee Mug" --regular_price=12.50 --status=publish --short_description="Ceramic, 350 ml." >/dev/null
+      wp wc product create --user="$ADMIN_ID" --name="Canvas Tote" --regular_price=24.00 --status=publish --short_description="Heavy canvas shopping bag." >/dev/null
+      echo "created sample products"
+    fi
+    wp rewrite flush
+    echo "store ready at $STORE_URL"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: store-setup
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: setup
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/component: setup
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+        {{- include "store.podSecurity" . | nindent 8 }}
+      affinity:
+        podAffinity:   # share the ReadWriteOnce content volume with the WordPress pod
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+                  app.kubernetes.io/component: wordpress
+      containers:
+        - name: setup
+          image: {{ .Values.images.wpcli }}
+          command: ["sh", "/scripts/setup.sh"]
+          securityContext:
+            {{- include "store.containerSecurity" . | nindent 12 }}
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: WP_CLI_CACHE_DIR, value: /tmp/wp-cli-cache }
+            - { name: WORDPRESS_DB_HOST, value: "mariadb:3306" }
+            - { name: WORDPRESS_DB_NAME, value: wordpress }
+            - { name: WORDPRESS_DB_USER, value: wordpress }
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: db-password } }
+            - { name: STORE_URL, value: {{ include "store.url" . | quote }} }
+            - { name: STORE_TITLE, value: {{ .Values.store.title | quote }} }
+            - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
+            - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: STORE_COUNTRY, value: {{ .Values.store.country | quote }} }
+            - { name: ADMIN_USER, value: {{ .Values.store.adminUser | quote }} }
+            - { name: ADMIN_EMAIL, value: {{ .Values.store.adminEmail | quote }} }
+            - { name: WC_VERSION, value: {{ .Values.store.woocommerceVersion | quote }} }
+            - { name: SAMPLE_PRODUCTS, value: {{ .Values.store.sampleProducts | quote }} }
+            - name: ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: wp-admin-password } }
+            - name: WC_CONSUMER_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: wc-consumer-key } }
+            - name: WC_CONSUMER_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: wc-consumer-secret } }
+          resources:
+            {{- toYaml .Values.resources.setup | nindent 12 }}
+          volumeMounts:
+            - name: content
+              mountPath: /var/www/html
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: wordpress
+        - name: scripts
+          configMap:
+            name: store-setup

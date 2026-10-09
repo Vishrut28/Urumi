@@ -1,0 +1,78 @@
+# The store's MCP server. ClusterIP only and no Ingress: reachable solely from
+# the gateway (NetworkPolicy below), and it demands the bearer token as well.
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-mcp
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: woo-mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-mcp
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: woo-mcp
+  template:
+    metadata:
+      labels:
+        {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/component: woo-mcp
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        {{- include "store.podSecurity" . | nindent 8 }}
+      containers:
+        - name: woo-mcp
+          image: "{{ .Values.images.wooMcp.repository }}:{{ .Values.images.wooMcp.tag }}"
+          imagePullPolicy: {{ .Values.images.wooMcp.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            {{- include "store.containerSecurity" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - { name: WC_STORE_URL, value: "http://wordpress:8080" }
+            - name: WC_CONSUMER_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: wc-consumer-key } }
+            - name: WC_CONSUMER_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: wc-consumer-secret } }
+            - name: MCP_AUTH_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: mcp-token } }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.wooMcp | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

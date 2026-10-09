@@ -1,0 +1,74 @@
+{{- range $name, $cfg := dict "utils-mcp" .Values.upstreams.utils "shipping-mcp" .Values.upstreams.shipping }}
+{{- if $cfg.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "platform.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "platform.selector" (dict "root" $ "name" $name) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "platform.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+    mcp-gateway/upstream: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" $ "name" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "platform.labels" $ | nindent 8 }}
+        app.kubernetes.io/name: {{ $name }}
+        mcp-gateway/upstream: "true"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "platform.podSecurity" $ | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: mcp
+          image: {{ include "platform.image" (dict "root" $ "name" $name) }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          securityContext:
+            {{- include "platform.containerSecurity" $ | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          {{- if eq $name "shipping-mcp" }}
+          env:
+            - name: SHIPPING_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: shipping-api-key } }
+          {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+{{- end }}
+{{- end }}

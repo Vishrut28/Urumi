@@ -1,0 +1,16 @@
+# Local k3d: *.localtest.me resolves to 127.0.0.1, k3d maps host :80 to Traefik.
+store:
+  host: shop.localtest.me
+  scheme: http
+  title: "Demo Store"
+images:
+  wooMcp:
+    repository: woo-mcp
+    tag: dev
+    pullPolicy: IfNotPresent
+persistence:
+  storageClass: local-path
+  wordpressSize: 2Gi
+  databaseSize: 2Gi
+networkPolicy:
+  gatewayNamespace: platform

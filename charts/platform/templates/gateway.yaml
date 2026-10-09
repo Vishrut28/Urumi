@@ -1,0 +1,138 @@
+{{- $seeds := list -}}
+{{- range $i, $s := .Values.gateway.seedServers -}}
+{{- $spec := dict "slug" $s.slug "name" $s.name "url" (tpl $s.url $) "auth_type" ($s.authType | default "none") "admin_only_tools" ($s.adminOnlyTools | default list) -}}
+{{- if $s.authHeader }}{{ $_ := set $spec "auth_header" $s.authHeader }}{{ end -}}
+{{- if $s.credentialKey }}{{ $_ := set $spec "credential_env" (printf "UPSTREAM_CREDENTIAL_%d" $i) }}{{ end -}}
+{{- $seeds = append $seeds $spec -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+data:
+  SEED_SERVERS: {{ toJson $seeds | quote }}
+  LLM_BASE_URL: {{ .Values.gateway.llm.baseUrl | quote }}
+  LLM_MODEL: {{ .Values.gateway.llm.model | quote }}
+  RATE_LIMIT_CALLS_PER_MINUTE: {{ .Values.gateway.rateLimitPerMinute | quote }}
+  HEALTH_INTERVAL_SECONDS: {{ .Values.gateway.healthIntervalSeconds | quote }}
+  SSRF_ALLOWED_INTERNAL_HOSTS: {{ .Values.gateway.ssrfAllowedInternalHosts | quote }}
+  PUBLIC_URL: {{ include "platform.url" . | quote }}
+  COOKIE_SECURE: {{ eq .Values.scheme "https" | quote }}
+  PROVISIONER_ENABLED: {{ .Values.gateway.provisioner.enabled | quote }}
+  {{- with .Values.gateway.provisioner }}
+  PROVISIONER_MAX_STORES_PER_USER: {{ .maxStoresPerUser | quote }}
+  PROVISIONER_TIMEOUT_SECONDS: {{ .timeoutSeconds | quote }}
+  PROVISIONER_STORE_DOMAIN: {{ .storeDomain | quote }}
+  PROVISIONER_STORE_SCHEME: {{ .storeScheme | quote }}
+  PROVISIONER_GATEWAY_NAMESPACE: {{ $.Release.Namespace | quote }}
+  PROVISIONER_INGRESS_CLASS: {{ $.Values.ingress.className | quote }}
+  PROVISIONER_STORE_IMAGE: "{{ $.Values.images.registry }}woo-mcp"
+  PROVISIONER_STORE_IMAGE_TAG: {{ $.Values.images.tag | quote }}
+  PROVISIONER_STORE_EXTRA_VALUES: {{ .storeValuesFile | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gateway
+spec:
+  selector:
+    {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 6 }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {{- include "platform.labels" . | nindent 8 }}
+        app.kubernetes.io/name: gateway
+      annotations:
+        checksum/config: {{ toJson $seeds | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: gateway
+      automountServiceAccountToken: {{ .Values.gateway.provisioner.enabled }}
+      enableServiceLinks: false
+      securityContext:
+        {{- include "platform.podSecurity" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 20 }}
+      containers:
+        - name: gateway
+          image: {{ include "platform.image" (dict "root" . "name" "gateway") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          securityContext:
+            {{- include "platform.containerSecurity" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: gateway
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password } }
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://gateway:$(POSTGRES_PASSWORD)@postgres:5432/gateway"
+            {{- range $k := list "session-secret" "api-key-pepper" "credentials-key" "admin-email" "admin-password" }}
+            - name: {{ $k | upper | replace "-" "_" }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $k }} } }
+            {{- end }}
+            - name: LLM_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: llm-api-key, optional: true } }
+            {{- range $i, $s := .Values.gateway.seedServers }}
+            {{- if $s.credentialKey }}
+            - name: UPSTREAM_CREDENTIAL_{{ $i }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $s.credentialKey }} } }
+            {{- end }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+automountServiceAccountToken: false

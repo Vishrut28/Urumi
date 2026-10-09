@@ -1,0 +1,8 @@
+Store "{{ .Values.store.title }}" in namespace {{ .Release.Namespace }}.
+
+Storefront:  {{ include "store.url" . }}/
+WP admin:    {{ include "store.url" . }}/wp-admin/   (user: {{ .Values.store.adminUser }})
+Password:    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.wp-admin-password}' | base64 -d
+
+MCP server (cluster-internal only): http://woo-mcp.{{ .Release.Namespace }}.svc.cluster.local:8000/mcp
+Setup progress: kubectl -n {{ .Release.Namespace }} logs job/store-setup -f

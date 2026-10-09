@@ -1,0 +1,38 @@
+# Public surface of the platform: the dashboard, its API, and the gateway's
+# MCP endpoint. /metrics, /healthz and every upstream MCP server stay internal.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.publicHost | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName | default "platform-tls" }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.publicHost | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: gateway, port: { name: http } }
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service: { name: gateway, port: { name: http } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: dashboard, port: { name: http } }

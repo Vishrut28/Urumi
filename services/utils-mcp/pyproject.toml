@@ -1,0 +1,12 @@
+[project]
+name = "utils-mcp"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["mcp==2.3.0", "uvicorn[standard]>=0.30", "tzdata"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["utils_mcp"]

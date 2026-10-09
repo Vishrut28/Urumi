@@ -1,0 +1,14 @@
+publicHost: app.localtest.me
+scheme: http
+images:
+  registry: ""
+  tag: dev
+  pullPolicy: IfNotPresent
+gateway:
+  replicas: 2
+  provisioner:
+    enabled: false   # flipped on once the provisioner image is built
+    storeDomain: localtest.me
+    storeScheme: http
+postgres:
+  storageClass: local-path

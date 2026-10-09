@@ -1,0 +1,144 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $inst := .Release.Name }}
+# Default deny for the platform namespace, then:
+#   ingress controller -> dashboard:8080, gateway:8080
+#   gateway -> postgres:5432, utils-mcp/shipping-mcp:8000, store namespaces' woo-mcp:8000,
+#              public internet :80/:443 (LLM API, external MCP servers; private and metadata ranges excluded)
+#   upstream MCP servers accept traffic only from the gateway and initiate none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: public-entry
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [dashboard, gateway] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-egress
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "platform.selector" (dict "root" . "name" "postgres") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              mcp-gateway/upstream: "true"
+      ports:
+        - { protocol: TCP, port: 8000 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.storeNamespaceLabel }}: "true"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: woo-mcp
+      ports:
+        - { protocol: TCP, port: 8000 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+    {{- if .Values.gateway.provisioner.enabled }}
+    - to:   # Kubernetes API, for the store provisioner only
+        - ipBlock:
+            cidr: {{ .Values.gateway.provisioner.apiServerCIDR }}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "name" "postgres") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: upstreams-from-gateway-only
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      mcp-gateway/upstream: "true"
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8000 }
+{{- end }}

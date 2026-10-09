@@ -1,0 +1,94 @@
+# Team MCP gateway platform. Local and production differ only through the
+# values-local.yaml / values-prod.yaml overlays next to this file.
+
+publicHost: app.localtest.me      # dashboard + gateway MCP endpoint (Ingress)
+scheme: http
+
+ingress:
+  className: traefik
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+    clusterIssuer: ""             # e.g. letsencrypt-prod with cert-manager
+
+# One Secret holds every platform credential (scripts/secrets.sh creates it).
+# Keys: session-secret, api-key-pepper, credentials-key, admin-email,
+# admin-password, postgres-password, llm-api-key, shipping-api-key,
+# upstream-woocommerce-token
+existingSecret: platform-secrets
+
+images:
+  registry: ""                    # e.g. ghcr.io/you/ in prod (with trailing slash)
+  tag: dev
+  pullPolicy: IfNotPresent
+  postgres: postgres:16.4-alpine
+
+gateway:
+  replicas: 2                     # stateless MCP transport: any replica serves any request
+  llm:
+    baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-flash
+  rateLimitPerMinute: 60
+  healthIntervalSeconds: 10
+  ssrfAllowedInternalHosts: "*.svc.cluster.local"
+  # Upstreams registered on first start. Credentials are referenced by Secret key, never inlined.
+  seedServers:
+    - slug: woocommerce
+      name: WooCommerce (main store)
+      url: http://woo-mcp.store-main.svc.cluster.local:8000/mcp
+      authType: bearer
+      credentialKey: upstream-woocommerce-token
+      adminOnlyTools: [create_product, update_order_status]
+    - slug: shipping
+      name: Shipping
+      url: http://shipping-mcp.{{ .Release.Namespace }}.svc.cluster.local:8000/mcp
+      authType: header
+      authHeader: X-API-Key
+      credentialKey: shipping-api-key
+      adminOnlyTools: [create_shipment]
+    - slug: utilities
+      name: Utilities
+      url: http://utils-mcp.{{ .Release.Namespace }}.svc.cluster.local:8000/mcp
+      authType: none
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: "1", memory: 384Mi }
+  provisioner:
+    enabled: false
+    maxStoresPerUser: 2
+    timeoutSeconds: 900
+    storeDomain: localtest.me     # stores get <slug>.<storeDomain>
+    storeScheme: http
+    storeValuesFile: ""           # extra values for provisioned stores (ConfigMap key)
+    apiServerCIDR: 0.0.0.0/0      # narrow to the API server address in prod
+
+dashboard:
+  replicas: 1
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+
+upstreams:
+  utils:
+    enabled: true
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+  shipping:
+    enabled: true
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+
+postgres:
+  storageClass: ""
+  size: 2Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: kube-system
+  storeNamespaceLabel: woo-mcp-gateway/store   # store namespaces carry this label = "true"

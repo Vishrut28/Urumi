@@ -1,0 +1,131 @@
+{{- $db := list
+  (dict "name" "WORDPRESS_DB_HOST" "value" "mariadb:3306")
+  (dict "name" "WORDPRESS_DB_NAME" "value" "wordpress")
+  (dict "name" "WORDPRESS_DB_USER" "value" "wordpress") -}}
+# Apache listens on 8080 so WordPress can run as www-data (uid 33) instead of root.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wordpress-apache
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+data:
+  ports.conf: |
+    Listen 8080
+  000-default.conf: |
+    <VirtualHost *:8080>
+      DocumentRoot /var/www/html
+      ErrorLog ${APACHE_LOG_DIR}/error.log
+      CustomLog ${APACHE_LOG_DIR}/access.log combined
+    </VirtualHost>
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.wordpressSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: wordpress
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # the content volume is ReadWriteOnce
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: wordpress
+  template:
+    metadata:
+      labels:
+        {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/component: wordpress
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+        {{- include "store.podSecurity" . | nindent 8 }}
+      containers:
+        - name: wordpress
+          image: {{ .Values.images.wordpress }}
+          securityContext:
+            {{- include "store.containerSecurity" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            {{- toYaml $db | nindent 12 }}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: db-password } }
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: |
+                define('FS_METHOD', 'direct');
+                define('WP_AUTO_UPDATE_CORE', false);
+          readinessProbe:
+            httpGet:
+              path: /wp-login.php
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            {{- toYaml .Values.resources.wordpress | nindent 12 }}
+          volumeMounts:
+            - name: content
+              mountPath: /var/www/html
+            - name: apache
+              mountPath: /etc/apache2/ports.conf
+              subPath: ports.conf
+            - name: apache
+              mountPath: /etc/apache2/sites-enabled/000-default.conf
+              subPath: 000-default.conf
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: wordpress
+        - name: apache
+          configMap:
+            name: wordpress-apache
