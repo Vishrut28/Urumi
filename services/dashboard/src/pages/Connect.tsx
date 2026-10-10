@@ -30,6 +30,8 @@ export default function Connect() {
       <section className="card">
         <h2>Claude Code</h2>
         <pre className="copy">{claude}</pre>
+        <p className="muted small">Or sign in with your browser instead of a key (OAuth): add the server without a header, then run /mcp in Claude Code and choose Authenticate.</p>
+        <pre className="copy">{`claude mcp add --transport http team-gateway ${url}`}</pre>
       </section>
       <section className="card">
         <h2>Cursor (~/.cursor/mcp.json)</h2>

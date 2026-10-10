@@ -2,6 +2,51 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, ApiKey, fmtTime } from "../api";
 import { useSession } from "../main";
 
+type Grant = { family: string; client_name: string; client_id: string; created_at: string; last_used_at: string | null; active: boolean };
+
+function ConnectedApps() {
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const load = useCallback(() => api<Grant[]>("/oauth/grants").then(setGrants), []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  if (grants.length === 0) return null;
+  return (
+    <>
+      <h2>Connected apps (OAuth)</h2>
+      <p className="muted small">MCP clients you signed in to with your browser instead of a key.</p>
+      <table className="card table">
+        <thead>
+          <tr>
+            <th>App</th>
+            <th>Connected</th>
+            <th>Last used</th>
+            <th>Status</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {grants.map((g) => (
+            <tr key={g.family} className={g.active ? "" : "dim"}>
+              <td>{g.client_name}</td>
+              <td>{fmtTime(g.created_at)}</td>
+              <td>{fmtTime(g.last_used_at)}</td>
+              <td>{g.active ? <span className="badge status-connected">active</span> : "revoked or expired"}</td>
+              <td>
+                {g.active && (
+                  <button className="danger" onClick={() => api(`/oauth/grants/${g.family}/revoke`, { method: "POST" }).then(load)}>
+                    Disconnect
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
 export default function Keys() {
   const { me } = useSession();
   const admin = me.role === "admin";
@@ -85,6 +130,7 @@ export default function Keys() {
           ))}
         </tbody>
       </table>
+      <ConnectedApps />
     </>
   );
 }

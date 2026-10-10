@@ -249,3 +249,90 @@ async def test_store_api_is_idempotent_limited_and_scoped(stack):
     assert (await other.delete(f"/api/stores/{first['id']}")).status_code == 404
     assert (await member.delete(f"/api/stores/{first['id']}")).status_code == 200
     assert {s["slug"]: s["status"] for s in (await admin.get("/api/stores")).json()}["berlin"] == "deleting"
+
+
+async def test_oauth_browser_login_flow(stack):
+    """An MCP client discovers the authorization server from the 401, registers, and logs a member in with PKCE."""
+    import base64
+    import hashlib
+    import secrets as _secrets
+    from urllib.parse import parse_qs, urlsplit
+
+    base, admin = stack["base"], stack["admin"]
+    member, _ = await invite_member(admin, base, "olga@example.com")
+    anon = httpx.AsyncClient(base_url=base, follow_redirects=False)
+
+    r = await anon.post("/mcp", json={})
+    challenge = r.headers["www-authenticate"]
+    assert r.status_code == 401 and "resource_metadata=" in challenge
+    prm_url = challenge.split('resource_metadata="')[1].split('"')[0]
+    prm = (await anon.get(urlsplit(prm_url).path)).json()
+    assert prm["resource"] == f"{base}/mcp"
+    meta = (await anon.get("/.well-known/oauth-authorization-server")).json()
+    assert meta["code_challenge_methods_supported"] == ["S256"] and meta["authorization_response_iss_parameter_supported"]
+
+    reg = (await anon.post("/oauth/register", json={"client_name": "Test CLI", "redirect_uris": ["http://127.0.0.1:33418/callback"]})).json()
+    client_id = reg["client_id"]
+    verifier = _secrets.token_urlsafe(48)
+    challenge_s256 = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    params = {"response_type": "code", "client_id": client_id, "redirect_uri": "http://127.0.0.1:50123/callback",  # any loopback port
+              "code_challenge": challenge_s256, "code_challenge_method": "S256", "state": "xyz", "resource": f"{base}/mcp", "scope": "mcp"}
+    r = await anon.get("/oauth/authorize", params=params)
+    assert r.status_code == 302 and r.headers["location"].startswith("/consent?req=")
+    req = parse_qs(urlsplit(r.headers["location"]).query)["req"][0]
+    assert (await anon.get("/api/oauth/request", params={"req": req})).status_code == 401  # must log in first
+    info = (await member.get("/api/oauth/request", params={"req": req})).json()
+    assert info["client_name"] == "Test CLI" and info["user"]["email"] == "olga@example.com"
+    redirect = (await member.post("/api/oauth/decision", json={"req": req, "approve": True})).json()["redirect"]
+    q = parse_qs(urlsplit(redirect).query)
+    assert redirect.startswith("http://127.0.0.1:50123/callback") and q["state"] == ["xyz"] and q["iss"] == [base]
+
+    form = {"grant_type": "authorization_code", "code": q["code"][0], "redirect_uri": params["redirect_uri"], "client_id": client_id, "resource": f"{base}/mcp"}
+    bad = await anon.post("/oauth/token", data={**form, "code_verifier": "x" * 50})
+    assert bad.status_code == 400 and bad.json()["error"] == "invalid_grant"
+    tokens = (await anon.post("/oauth/token", data={**form, "code_verifier": verifier})).json()
+    assert tokens["token_type"] == "Bearer" and tokens["access_token"].startswith("mgo_")
+    again = await anon.post("/oauth/token", data={**form, "code_verifier": verifier})
+    assert again.json()["error"] == "invalid_grant"  # codes are single-use
+
+    async with mcp_client(base, tokens["access_token"]) as c:
+        names = {t.name for t in (await c.list_tools()).tools}
+        assert "utilities__calculate" in names and "shipping__create_shipment" not in names  # member's view
+        assert not (await c.call_tool("utilities__calculate", {"expression": "6*7"})).is_error
+    row = (await admin.get("/api/audit")).json()[0]
+    assert (row["user_email"], row["source"], row["tool"]) == ("olga@example.com", "oauth", "calculate")
+
+    refreshed = (await anon.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id})).json()
+    assert refreshed["refresh_token"] != tokens["refresh_token"]
+    replay = await anon.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id})
+    assert replay.json()["error"] == "invalid_grant"  # rotated token replayed -> the whole grant is revoked
+    r = await anon.post("/mcp", headers={"Authorization": f"Bearer {refreshed['access_token']}"}, json={})
+    assert r.status_code == 401 and 'error="invalid_token"' in r.headers["www-authenticate"]
+
+    assert (await anon.get("/oauth/authorize", params={**params, "redirect_uri": "https://evil.example/cb"})).status_code == 400
+    r = await anon.get("/oauth/authorize", params={**params, "resource": "https://other.example/mcp"})
+    assert "error=invalid_target" in r.headers["location"]
+    grants = (await member.get("/api/oauth/grants")).json()
+    assert grants and grants[0]["client_name"] == "Test CLI" and not grants[0]["active"]
+
+
+async def test_discover_mode_searches_then_calls(stack):
+    base, admin = stack["base"], stack["admin"]
+    _, key = await invite_member(admin, base, "pia@example.com")
+    http = httpx2.AsyncClient(headers={"Authorization": f"Bearer {key}"})
+    async with Client(streamable_http_client(f"{base}/mcp?tools=discover", http_client=http)) as c:
+        names = [t.name for t in (await c.list_tools()).tools]
+        assert names == ["gateway__list_servers", "gateway__search_tools", "gateway__call_tool"]
+        servers = (await c.call_tool("gateway__list_servers", {})).structured_content["servers"]
+        assert {s["prefix"] for s in servers} == {"utilities", "shipping"}
+        hits = (await c.call_tool("gateway__search_tools", {"query": "convert currency"})).structured_content["matches"]
+        assert hits[0]["name"] == "utilities__convert_currency" and "properties" in hits[0]["input_schema"]
+        hidden = (await c.call_tool("gateway__search_tools", {"query": "create shipment"})).structured_content["matches"]
+        assert "shipping__create_shipment" not in [h["name"] for h in hidden]  # admin-only stays invisible
+        r = await c.call_tool("gateway__call_tool", {"name": "utilities__convert_currency", "arguments": {"amount": "10", "from_currency": "USD", "to_currency": "GBP"}})
+        assert not r.is_error and r.structured_content["converted"] == "7.90"
+        denied = await c.call_tool("gateway__call_tool", {"name": "shipping__create_shipment", "arguments": {"order_id": 1}})
+        assert denied.is_error
+    async with httpx.AsyncClient() as raw:
+        r = await raw.get(f"{base}/healthz")
+        assert r.headers.get("x-served-by")

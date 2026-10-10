@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import timedelta
 from typing import Any
@@ -26,10 +27,36 @@ from gateway import audit, metrics
 from gateway.audit import Principal
 from gateway.config import Settings
 from gateway.db import ApiKey, Database, UpstreamServer, User, utcnow
+from gateway.oauth_store import ACCESS_PREFIX, OAuthToken, resource_metadata_url
 from gateway.security import API_KEY_PREFIX, CredentialBox, hash_api_key, verify_token
 from gateway.upstreams import SEP, HealthMonitor, UpstreamFailure, as_gateway_tool, call_tool, guard, target_for
 
 log = logging.getLogger("gateway.mcp")
+
+META_LIST, META_SEARCH, META_CALL = "gateway__list_servers", "gateway__search_tools", "gateway__call_tool"
+META_TOOLS = [
+    types.Tool(name=META_LIST, description="[Gateway] List the connected servers and how many tools each offers.",
+               input_schema={"type": "object", "properties": {}}, annotations=types.ToolAnnotations(read_only_hint=True)),
+    types.Tool(name=META_SEARCH, description="[Gateway] Search all available tools by keywords (and optionally one server). Returns names, descriptions and input schemas to use with gateway__call_tool.",
+               input_schema={"type": "object", "properties": {"query": {"type": "string", "description": "What you want to do, e.g. 'orders today'"},
+                                                              "server": {"type": "string", "description": "Optional server prefix, e.g. 'woocommerce'"},
+                                                              "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8}}, "required": ["query"]},
+               annotations=types.ToolAnnotations(read_only_hint=True)),
+    types.Tool(name=META_CALL, description="[Gateway] Call a tool found with gateway__search_tools, by its full name, with its arguments.",
+               input_schema={"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name"]}),
+]
+
+
+def search_tools(tools: list[types.Tool], query: str, limit: int = 8) -> list[types.Tool]:
+    """Keyword ranking over names and descriptions; a name hit counts triple."""
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 1]
+
+    def score(t: types.Tool) -> int:
+        hay = f"{t.name} {t.description or ''}".lower().replace("_", " ")
+        return sum(3 if w in t.name.lower() else 1 for w in words if w in hay)
+
+    return sorted((t for t in tools if score(t) > 0), key=score, reverse=True)[:limit]
+
 
 INSTRUCTIONS = (
     "Team MCP gateway. Every tool is named <server>__<tool>; the prefix says which system it acts on "
@@ -67,14 +94,36 @@ class Gateway:
             return True
         return server.owner_id is not None and server.owner_id == principal.user_id
 
+    async def _all_tools(self, principal: Principal) -> list[types.Tool]:
+        return [as_gateway_tool(server.slug, server.name, entry) for server, entry in await self.visible_tools(principal)]
+
     async def _list_tools(self, ctx: Any, params: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         principal = _principal(ctx)
-        return types.ListToolsResult(tools=[as_gateway_tool(server.slug, server.name, entry) for server, entry in await self.visible_tools(principal)])
+        if _tool_mode(ctx) == "discover":
+            # Hundreds of tools are too many to hand a model at once: offer search-then-call instead.
+            return types.ListToolsResult(tools=META_TOOLS)
+        return types.ListToolsResult(tools=await self._all_tools(principal))
 
     # --- calls ----------------------------------------------------------------
 
     async def _call_tool(self, ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
-        return await self.invoke(_principal(ctx), params.name, params.arguments or {})
+        principal, args = _principal(ctx), params.arguments or {}
+        if params.name == META_LIST:
+            counts: dict[str, list[Any]] = {}
+            for server, _entry in await self.visible_tools(principal):
+                counts.setdefault(server.slug, [server.name, 0])[1] += 1
+            data = {"servers": [{"prefix": k, "name": v[0], "tools": v[1]} for k, v in counts.items()]}
+            return types.CallToolResult(content=[types.TextContent(text=json.dumps(data))], structured_content=data)
+        if params.name == META_SEARCH:
+            tools = await self._all_tools(principal)
+            if args.get("server"):
+                tools = [t for t in tools if t.name.startswith(f"{args['server']}{SEP}")]
+            hits = search_tools(tools, str(args.get("query", "")), int(args.get("limit") or 8))
+            data = {"matches": [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in hits], "total_tools": len(tools)}
+            return types.CallToolResult(content=[types.TextContent(text=json.dumps(data))], structured_content=data)
+        if params.name == META_CALL:
+            return await self.invoke(principal, str(args.get("name", "")), args.get("arguments") or {})
+        return await self.invoke(principal, params.name, args)
 
     async def invoke(self, principal: Principal, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         started = time.monotonic()
@@ -117,6 +166,11 @@ def _error(text: str) -> types.CallToolResult:
     return types.CallToolResult(content=[types.TextContent(text=text)], is_error=True)
 
 
+def _tool_mode(ctx: Any) -> str:
+    request = getattr(ctx, "request", None)
+    return getattr(getattr(request, "state", None), "tool_mode", "all") if request is not None else "all"
+
+
 def _principal(ctx: Any) -> Principal:
     request = getattr(ctx, "request", None)
     principal = getattr(getattr(request, "state", None), "principal", None) if request is not None else None
@@ -143,7 +197,7 @@ class McpAuth:
             token = auth[7:].strip()
         if not token:
             metrics.AUTH_FAILURES.labels("missing").inc()
-            return await _deny(send, "missing API key: send 'Authorization: Bearer <key>'")
+            return await _deny(send, "missing credentials: send 'Authorization: Bearer <API key or OAuth token>'", self.gw.settings.public_url)
 
         principal: Principal | None = None
         settings = self.gw.settings
@@ -154,6 +208,22 @@ class McpAuth:
                     user = await s.get(User, int(payload["uid"]))
                 if user and user.active:
                     principal = Principal(user.id, user.email, user.role, "chat")
+        elif token.startswith(ACCESS_PREFIX):
+            # OAuth access token from this gateway's authorization server, audience-bound to this MCP URL.
+            async with self.gw.db.session() as s:
+                row = (await s.execute(select(OAuthToken, User).join(User, User.id == OAuthToken.user_id)
+                                       .where(OAuthToken.token_hash == hash_api_key(token, settings.api_key_pepper), OAuthToken.kind == "access"))).first()
+                if row:
+                    grant, user = row
+                    audience_ok = grant.resource.rstrip("/") == f"{settings.public_url.rstrip('/')}/mcp"
+                    if grant.revoked_at is None and grant.expires_at > utcnow() and user.active and audience_ok:
+                        principal = Principal(user.id, user.email, user.role, "oauth", f"oauth:{grant.client_name[:10]}")
+                        if grant.last_used_at is None or utcnow() - grant.last_used_at > timedelta(seconds=60):
+                            grant.last_used_at = utcnow()
+                            await s.commit()
+            if principal is None:
+                metrics.AUTH_FAILURES.labels("oauth_invalid").inc()
+                return await _deny(send, "access token invalid, expired or revoked", settings.public_url, error="invalid_token")
         elif token.startswith(API_KEY_PREFIX):
             async with self.gw.db.session() as s:
                 row = (await s.execute(select(ApiKey, User).join(User).where(ApiKey.key_hash == hash_api_key(token, settings.api_key_pepper)))).first()
@@ -163,15 +233,18 @@ class McpAuth:
                         metrics.AUTH_FAILURES.labels("revoked").inc()
                         reason = "API key revoked" if key.revoked_at is not None else "user deactivated"
                         await self._audit_rejected(receive, user, key.prefix, reason)
-                        return await _deny(send, f"{reason}: generate a new key in the dashboard")
+                        return await _deny(send, f"{reason}: generate a new key in the dashboard", settings.public_url)
                     principal = Principal(user.id, user.email, user.role, "mcp", key.prefix)
                     if key.last_used_at is None or utcnow() - key.last_used_at > timedelta(seconds=60):
                         key.last_used_at = utcnow()
                         await s.commit()
         if principal is None:
             metrics.AUTH_FAILURES.labels("invalid").inc()
-            return await _deny(send, "invalid API key")
-        scope.setdefault("state", {})["principal"] = principal
+            return await _deny(send, "invalid API key", settings.public_url)
+        state = scope.setdefault("state", {})
+        state["principal"] = principal
+        query = scope.get("query_string", b"").decode()
+        state["tool_mode"] = "discover" if ("tools=discover" in query or headers.get("x-mcp-tool-mode") == "discover") else "all"
         await self.app(scope, receive, send)
 
     async def _audit_rejected(self, receive: Receive, user: User, prefix: str, reason: str) -> None:
@@ -192,7 +265,11 @@ class McpAuth:
             await audit.record(self.gw.db, None, tool=name.split(SEP, 1)[-1], server=slug, started=time.monotonic(), outcome="rejected", error=reason, source="mcp", user_id=user.id, user_email=user.email, key_prefix=prefix)
 
 
-async def _deny(send: Send, message: str) -> None:
+async def _deny(send: Send, message: str, public_url: str, error: str | None = None) -> None:
+    """401 with the RFC 9728 challenge, so OAuth-capable clients can discover how to log in."""
     body = json.dumps({"error": "unauthorized", "message": message}).encode()
-    await send({"type": "http.response.start", "status": 401, "headers": [(b"content-type", b"application/json"), (b"www-authenticate", b'Bearer realm="mcp-gateway"')]})
+    challenge = f'Bearer realm="mcp-gateway", resource_metadata="{resource_metadata_url(public_url)}", scope="mcp"'
+    if error:
+        challenge += f', error="{error}"'
+    await send({"type": "http.response.start", "status": 401, "headers": [(b"content-type", b"application/json"), (b"www-authenticate", challenge.encode())]})
     await send({"type": "http.response.body", "body": body})

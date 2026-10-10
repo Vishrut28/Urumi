@@ -1,5 +1,5 @@
-# Public surface of the platform: the dashboard, its API, and the gateway's
-# MCP endpoint. /metrics, /healthz and every upstream MCP server stay internal.
+# Public surface of the platform: the dashboard, its API, the gateway's MCP
+# endpoint and its OAuth authorization server. /metrics, /healthz and every upstream MCP server stay internal.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -29,6 +29,14 @@ spec:
             backend:
               service: { name: gateway, port: { name: http } }
           - path: /mcp
+            pathType: Prefix
+            backend:
+              service: { name: gateway, port: { name: http } }
+          - path: /oauth                # OAuth 2.1 authorization server (authorize, token, register, revoke)
+            pathType: Prefix
+            backend:
+              service: { name: gateway, port: { name: http } }
+          - path: /.well-known          # RFC 9728 / RFC 8414 discovery documents
             pathType: Prefix
             backend:
               service: { name: gateway, port: { name: http } }

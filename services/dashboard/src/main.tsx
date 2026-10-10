@@ -6,6 +6,7 @@ import "./style.css";
 import Accept from "./pages/Accept";
 import Audit from "./pages/Audit";
 import Chat from "./pages/Chat";
+import Consent from "./pages/Consent";
 import Connect from "./pages/Connect";
 import Keys from "./pages/Keys";
 import Login from "./pages/Login";
@@ -79,6 +80,7 @@ function App() {
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/servers" /> : <Login onLogin={setMe} />} />
       <Route path="/accept" element={<Accept onLogin={setMe} />} />
+      <Route path="/consent" element={<Consent />} />
       <Route path="*" element={me ? <Shell me={me} setMe={setMe} /> : <Navigate to="/login" />} />
     </Routes>
   );

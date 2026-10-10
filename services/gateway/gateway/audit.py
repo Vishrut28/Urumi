@@ -20,7 +20,7 @@ class Principal:
     user_id: int
     email: str
     role: str  # admin | member
-    source: str  # mcp (an API key) | chat (the dashboard agent acting as the user)
+    source: str  # mcp (an API key) | oauth (an OAuth access token) | chat (the dashboard agent acting as the user)
     key_prefix: str | None = None
 
     @property
