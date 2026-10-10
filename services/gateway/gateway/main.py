@@ -38,13 +38,6 @@ def create_app(settings: Settings | None = None, *, start_monitor: bool = True) 
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await db.create_all()
         await seed(settings, db, box)
-        provisioner = None
-        if settings.provisioner_enabled:
-            from gateway.stores import Provisioner
-
-            provisioner = Provisioner(settings, db, monitor)
-            app.state.provisioner = provisioner
-            provisioner.start()
         async with gateway.server.session_manager.run():
             if start_monitor:
                 monitor.start()
@@ -52,8 +45,6 @@ def create_app(settings: Settings | None = None, *, start_monitor: bool = True) 
                 yield
             finally:
                 await monitor.stop()
-                if provisioner:
-                    await provisioner.stop()
                 await db.dispose()
 
     api = FastAPI(title="MCP Gateway", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

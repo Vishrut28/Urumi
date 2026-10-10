@@ -127,8 +127,8 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.gatewayNamespace }}
           podSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.gatewayPodLabels | nindent 14 }}
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: {{ toJson .Values.networkPolicy.gatewayPodNames }} }
       ports:
         - { protocol: TCP, port: 8000 }
   egress:

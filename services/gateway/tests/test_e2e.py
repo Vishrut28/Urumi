@@ -88,7 +88,7 @@ async def stack(tmp_path):
         session_secret="s" * 32, api_key_pepper="p" * 32, credentials_key=Fernet.generate_key().decode(),
         admin_email="alice@example.com", admin_password="alice-password-1",
         llm_base_url=f"http://127.0.0.1:{llm_port}/v1", llm_api_key="fake", llm_model="fake-model",
-        health_interval_seconds=1, health_timeout_seconds=2, ssrf_allow_all=True,
+        health_interval_seconds=1, health_timeout_seconds=2, ssrf_allow_all=True, provisioner_enabled=True,
         self_mcp_url=f"http://127.0.0.1:{gw_port}/mcp", public_url=f"http://127.0.0.1:{gw_port}",
         seed_servers=json.dumps([
             {"slug": "utilities", "name": "Utilities", "url": f"http://127.0.0.1:{utils_port}/mcp"},
@@ -230,3 +230,22 @@ async def test_llm_error_reaches_the_user_readably(stack):
     r = await stack["admin"].post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 502
     assert "HTTP 404" in r.json()["detail"] and "no longer available" in r.json()["detail"]
+
+
+async def test_store_api_is_idempotent_limited_and_scoped(stack):
+    base, admin = stack["base"], stack["admin"]
+    member, _ = await invite_member(admin, base, "dora@example.com")
+    first = (await member.post("/api/stores", json={"name": "Berlin", "slug": "berlin"})).json()
+    again = (await member.post("/api/stores", json={"name": "Berlin", "slug": "berlin"})).json()
+    assert first["id"] == again["id"] and first["status"] == "provisioning"  # retrying the request is safe
+    assert first["namespace"] == "store-berlin" and first["url"].startswith("http://berlin.")
+    assert (await member.post("/api/stores", json={"name": "Paris", "slug": "paris"})).status_code == 200
+    r = await member.post("/api/stores", json={"name": "Rome", "slug": "rome"})
+    assert r.status_code == 429 and "limit" in r.json()["detail"]
+    assert (await admin.post("/api/stores", json={"name": "Taken", "slug": "berlin"})).status_code == 409
+    assert (await member.post("/api/stores", json={"name": "x", "slug": "main"})).status_code == 422
+    other, _ = await invite_member(admin, base, "erin@example.com")
+    assert (await other.get("/api/stores")).json() == []
+    assert (await other.delete(f"/api/stores/{first['id']}")).status_code == 404
+    assert (await member.delete(f"/api/stores/{first['id']}")).status_code == 200
+    assert {s["slug"]: s["status"] for s in (await admin.get("/api/stores")).json()}["berlin"] == "deleting"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import secrets
 from datetime import timedelta
 from typing import Annotated, Any, Literal
@@ -17,9 +19,11 @@ from gateway.chat import ChatError, run_chat
 from gateway.db import ApiKey, AuditLog, Invite, UpstreamServer, User, utcnow
 from gateway.security import hash_api_key, hash_password, hash_token, new_api_key, sign_token, verify_password, verify_token
 from gateway.ssrf import UnsafeURL, check_url
+from gateway.mcp_endpoint import Gateway
 from gateway.upstreams import SLUG_RE, as_gateway_tool
 
 router = APIRouter(prefix="/api")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
 Email = Annotated[str, Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=320)]
 COOKIE = "mgw_session"
 SESSION_TTL = 12 * 3600
@@ -281,19 +285,56 @@ class ServerPatch(BaseModel):
     admin_only_tools: list[str] | None = None
 
 
+class HostedIn(BaseModel):
+    """An MCP server the platform runs from a container image (Streamable HTTP inside the container)."""
+
+    slug: str
+    name: str = Field(min_length=1, max_length=200)
+    image: str = Field(min_length=3, max_length=500, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/:@-]*$")
+    port: int = Field(default=8000, ge=1024, le=65535)
+    path: str = Field(default="/mcp", max_length=200, pattern=r"^/[A-Za-z0-9._/-]*$")
+    env: dict[str, str] = Field(default_factory=dict)  # becomes a Secret in the server's namespace
+    allow_egress: bool = False  # outbound HTTPS to the internet (never to private ranges)
+    timeout_seconds: float = Field(default=20, ge=1, le=120)
+    admin_only_tools: list[str] = []
+
+    @field_validator("slug")
+    @classmethod
+    def _slug(cls, v: str) -> str:
+        if not SLUG_RE.match(v) or len(v) > 20:
+            raise ValueError("slug: lowercase letters, digits and single hyphens, 1-20 characters, starting with a letter")
+        return v
+
+    @field_validator("env")
+    @classmethod
+    def _env(cls, v: dict[str, str]) -> dict[str, str]:
+        for k in v:
+            if not ENV_NAME.match(k):
+                raise ValueError(f"invalid environment variable name {k!r}")
+        return v
+
+
+class HostedPatch(BaseModel):
+    image: str | None = Field(default=None, min_length=3, max_length=500, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/:@-]*$")
+    env: dict[str, str] | None = None
+    allow_egress: bool | None = None
+
+
 def _server_out(server: UpstreamServer, user: User) -> dict[str, Any]:
     principal = Principal(user.id, user.email, user.role, "mcp")
     tools = []
     for e in server.tools or []:
         admin_only = e["upstream"] in (server.admin_only_tools or [])
-        if admin_only and user.role != "admin":
+        if not Gateway.allowed(principal, server, e["upstream"]):
             continue
         t = as_gateway_tool(server.slug, server.name, e)
         tools.append({"name": t.name, "upstream": e["upstream"], "description": e["definition"].get("description", ""), "admin_only": admin_only, "read_only": bool((e["definition"].get("annotations") or {}).get("readOnlyHint"))})
-    status = "disabled" if not server.enabled else server.status
+    status, reason = ("disabled", None) if not server.enabled else (server.status, server.status_reason)
+    if server.hosted_state in ("deploying", "failed", "deleting"):
+        status, reason = server.hosted_state, server.hosted_reason
     out = {
         "id": server.id, "slug": server.slug, "name": server.name, "enabled": server.enabled,
-        "status": status, "status_reason": server.status_reason if server.enabled else None,
+        "status": status, "status_reason": reason,
         "checked_at": server.checked_at, "tools": tools, "managed_by": server.managed_by,
     }
     if principal.is_admin:  # members do not need to know where upstreams live
@@ -302,6 +343,10 @@ def _server_out(server: UpstreamServer, user: User) -> dict[str, Any]:
             has_credential=bool(server.credential_enc), timeout_seconds=server.timeout_seconds,
             admin_only_tools=server.admin_only_tools or [],
         )
+        if server.hosted_image:
+            out["hosted"] = {"image": server.hosted_image, "port": server.hosted_port, "path": server.hosted_path,
+                             "has_env": bool(server.hosted_env_enc), "allow_egress": bool(server.hosted_allow_egress),
+                             "namespace": f"mcp-{server.slug}"}
     return out
 
 
@@ -340,6 +385,46 @@ async def create_server(body: ServerIn, request: Request, admin: AdminUser) -> d
     return await _reload(request, server.id, admin)
 
 
+@router.post("/servers/hosted")
+async def create_hosted_server(body: HostedIn, request: Request, admin: AdminUser) -> dict[str, Any]:
+    g = gw(request)
+    if not g.settings.provisioner_enabled:
+        raise HTTPException(400, "hosted servers need the provisioner (gateway.provisioner.enabled)")
+    async with g.db.session() as s:
+        if await s.scalar(select(UpstreamServer).where(UpstreamServer.slug == body.slug)):
+            raise HTTPException(409, "slug already in use")
+        server = UpstreamServer(
+            slug=body.slug, name=body.name, url=f"http://{body.slug}.mcp-{body.slug}.svc.cluster.local:{body.port}{body.path}",
+            auth_type="none", enabled=True, timeout_seconds=body.timeout_seconds, admin_only_tools=body.admin_only_tools,
+            managed_by="hosted", hosted_image=body.image, hosted_port=body.port, hosted_path=body.path,
+            hosted_env_enc=g.box.seal(json.dumps(body.env)) if body.env else None, hosted_allow_egress=body.allow_egress,
+            hosted_state="deploying", status="unknown",
+        )
+        s.add(server)
+        await s.commit()
+    return await _reload(request, server.id, admin)
+
+
+@router.patch("/servers/{server_id}/hosted")
+async def update_hosted_server(server_id: int, body: HostedPatch, request: Request, admin: AdminUser) -> dict[str, Any]:
+    g = gw(request)
+    async with g.db.session() as s:
+        server = await s.get(UpstreamServer, server_id)
+        if server is None or not server.hosted_image:
+            raise HTTPException(404, "no such hosted server")
+        if server.hosted_state == "deleting":
+            raise HTTPException(409, "server is being removed")
+        if body.image:
+            server.hosted_image = body.image
+        if body.env is not None:
+            server.hosted_env_enc = g.box.seal(json.dumps(body.env)) if body.env else None
+        if body.allow_egress is not None:
+            server.hosted_allow_egress = body.allow_egress
+        server.hosted_state, server.hosted_reason, server.status = "deploying", None, "unknown"
+        await s.commit()
+    return await _reload(request, server_id, admin)
+
+
 @router.patch("/servers/{server_id}")
 async def update_server(server_id: int, body: ServerPatch, request: Request, admin: AdminUser) -> dict[str, Any]:
     g = gw(request)
@@ -349,6 +434,8 @@ async def update_server(server_id: int, body: ServerPatch, request: Request, adm
         server = await s.get(UpstreamServer, server_id)
         if server is None:
             raise HTTPException(404, "no such server")
+        if server.hosted_image and (body.url or body.auth_type):
+            raise HTTPException(409, "a hosted server's URL is managed by the platform")
         fields = body.model_dump(exclude_unset=True, exclude={"credential"})
         for k, v in fields.items():
             if v is not None or k == "auth_header":
@@ -375,7 +462,11 @@ async def delete_server(server_id: int, request: Request, admin: AdminUser) -> d
             raise HTTPException(404, "no such server")
         if server.managed_by and server.managed_by.startswith("store:"):
             raise HTTPException(409, "this server belongs to a provisioned store; delete the store instead")
-        await s.delete(server)
+        if server.hosted_image:
+            # Tools disappear now; the provisioner removes the namespace, then the row.
+            server.enabled, server.hosted_state, server.hosted_reason = False, "deleting", None
+        else:
+            await s.delete(server)
         await s.commit()
     return {"ok": True}
 

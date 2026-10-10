@@ -88,6 +88,13 @@ spec:
               app.kubernetes.io/component: woo-mcp
       ports:
         - { protocol: TCP, port: 8000 }
+    - to:   # hosted MCP servers deployed by the provisioner (their port is the admin's choice)
+        - namespaceSelector:
+            matchLabels:
+              woo-mcp-gateway/hosted: "true"
+          podSelector:
+            matchLabels:
+              mcp-gateway/hosted-server: "true"
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -95,14 +102,50 @@ spec:
       ports:
         - { protocol: TCP, port: 80 }
         - { protocol: TCP, port: 443 }
-    {{- if .Values.gateway.provisioner.enabled }}
-    - to:   # Kubernetes API, for the store provisioner only
+{{- if .Values.gateway.provisioner.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provisioner-egress
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "name" "provisioner") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "platform.selector" (dict "root" . "name" "postgres") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:   # Kubernetes API (the Service IP is DNATed to the API server's own address and port)
         - ipBlock:
             cidr: {{ .Values.gateway.provisioner.apiServerCIDR }}
       ports:
         - { protocol: TCP, port: 443 }
         - { protocol: TCP, port: 6443 }
-    {{- end }}
+    - to:   # probing a new store's MCP server before declaring it ready
+        - namespaceSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.storeNamespaceLabel }}: "true"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: woo-mcp
+      ports:
+        - { protocol: TCP, port: 8000 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              woo-mcp-gateway/hosted: "true"
+          podSelector:
+            matchLabels:
+              mcp-gateway/hosted-server: "true"
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -118,8 +161,8 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchLabels:
-              {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 14 }}
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [gateway, provisioner] }
       ports:
         - { protocol: TCP, port: 5432 }
 ---

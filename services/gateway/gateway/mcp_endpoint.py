@@ -62,7 +62,10 @@ class Gateway:
 
     @staticmethod
     def allowed(principal: Principal, server: UpstreamServer, upstream_tool: str) -> bool:
-        return principal.is_admin or upstream_tool not in (server.admin_only_tools or [])
+        """Admin-only tools are for admins and for the server's owner (per-user grant); everything else for everyone."""
+        if principal.is_admin or upstream_tool not in (server.admin_only_tools or []):
+            return True
+        return server.owner_id is not None and server.owner_id == principal.user_id
 
     async def _list_tools(self, ctx: Any, params: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         principal = _principal(ctx)
@@ -87,7 +90,7 @@ class Gateway:
         tool = entry["upstream"]
         if not self.allowed(principal, server, tool):
             await audit.record(self.db, principal, tool=tool, server=slug, started=started, outcome="denied", error="admin-only tool")
-            return _error(f"Permission denied: {name} is restricted to admins.")
+            return _error(f"Permission denied: {name} is restricted to admins and the server's owner.")
         limit = self.settings.rate_limit_calls_per_minute
         if limit and await audit.calls_last_minute(self.db, principal.user_id) >= limit:
             await audit.record(self.db, principal, tool=tool, server=slug, started=started, outcome="rejected", error=f"rate limit {limit}/min")

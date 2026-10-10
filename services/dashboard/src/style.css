@@ -43,7 +43,7 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0; }
 a { color: var(--accent); }
 input, select, button { font: inherit; color: inherit; }
-input, select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; min-width: 0; }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; min-width: 0; }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
 button:hover { border-color: var(--muted); }
@@ -89,8 +89,8 @@ label.row { flex-direction: row; }
 
 .badge { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--code-bg); color: var(--muted); }
 .status-connected, .outcome-ok, .store-ready { background: var(--ok-bg); color: var(--ok); }
-.status-unreachable, .outcome-error, .outcome-timeout, .outcome-unreachable, .outcome-denied, .outcome-rejected, .store-failed { background: var(--bad-bg); color: var(--bad); }
-.status-unknown, .store-provisioning, .store-deleting { background: var(--warn-bg); color: var(--warn); }
+.status-unreachable, .status-failed, .outcome-error, .outcome-timeout, .outcome-unreachable, .outcome-denied, .outcome-rejected, .store-failed { background: var(--bad-bg); color: var(--bad); }
+.status-unknown, .status-deploying, .status-deleting, .store-provisioning, .store-deleting { background: var(--warn-bg); color: var(--warn); }
 .role-admin { color: var(--accent); font-weight: 600; }
 
 table { width: 100%; border-collapse: collapse; }

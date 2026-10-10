@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -84,7 +84,16 @@ class UpstreamServer(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     timeout_seconds: Mapped[float] = mapped_column(Float, default=20.0)
     admin_only_tools: Mapped[list[Any]] = mapped_column(default=list)  # upstream tool names members may not use
-    managed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)  # "seed" or "store:<id>"
+    owner_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # may use admin-only tools too (a provisioned store's owner)
+    managed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)  # "seed", "store:<id>" or "hosted"
+    # Hosted servers (deployed by the platform from a container image).
+    hosted_image: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    hosted_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hosted_path: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    hosted_env_enc: Mapped[str | None] = mapped_column(Text, nullable=True)  # Fernet(JSON env), becomes a Secret
+    hosted_allow_egress: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hosted_state: Mapped[str | None] = mapped_column(String(16), nullable=True)  # deploying | ready | failed | deleting
+    hosted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     # Health, written by every replica's probe loop.
     status: Mapped[str] = mapped_column(String(16), default="unknown")  # unknown | connected | unreachable
@@ -125,7 +134,29 @@ class Store(Base):
     namespace: Mapped[str] = mapped_column(String(63))
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     deadline_at: Mapped[datetime]
-    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+    step: Mapped[str | None] = mapped_column(String(64), nullable=True)  # last provisioning step reached
+    attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+def _add_missing_columns(sync_conn: Any) -> None:
+    """Additive migrations: create_all never alters existing tables, so add new nullable columns here.
+
+    Only nullable columns are ever added to existing tables, which keeps every
+    schema change backward compatible: an older gateway (after `helm rollback`)
+    simply ignores the new columns.
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(sync_conn)
+    for table in Base.metadata.sorted_tables:
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name not in existing:
+                if not column.nullable:
+                    raise RuntimeError(f"cannot add NOT NULL column {table.name}.{column.name} to an existing table")
+                ddl = column.type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {ddl}')
 
 
 class Database:
@@ -142,6 +173,7 @@ class Database:
                 # Replicas start together; serialise schema creation.
                 await conn.exec_driver_sql("SELECT pg_advisory_xact_lock(727274)")
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(_add_missing_columns)
 
     async def dispose(self) -> None:
         await self.engine.dispose()

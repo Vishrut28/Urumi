@@ -30,7 +30,6 @@ data:
   PROVISIONER_INGRESS_CLASS: {{ $.Values.ingress.className | quote }}
   PROVISIONER_STORE_IMAGE: "{{ $.Values.images.registry }}woo-mcp"
   PROVISIONER_STORE_IMAGE_TAG: {{ $.Values.images.tag | quote }}
-  PROVISIONER_STORE_EXTRA_VALUES: {{ .storeValuesFile | quote }}
   {{- end }}
 ---
 apiVersion: v1
@@ -71,7 +70,7 @@ spec:
         checksum/config: {{ toJson $seeds | sha256sum | trunc 16 }}
     spec:
       serviceAccountName: gateway
-      automountServiceAccountToken: {{ .Values.gateway.provisioner.enabled }}
+      automountServiceAccountToken: false   # the gateway never calls the Kubernetes API
       enableServiceLinks: false
       securityContext:
         {{- include "platform.podSecurity" . | nindent 8 }}

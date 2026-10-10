@@ -2,7 +2,15 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, fmtTime, Server } from "../api";
 import { useSession } from "../main";
 
-const STATUS_LABEL: Record<Server["status"], string> = { connected: "Connected", unreachable: "Unreachable", disabled: "Disabled", unknown: "Checking…" };
+const STATUS_LABEL: Record<Server["status"], string> = {
+  connected: "Connected",
+  unreachable: "Unreachable",
+  disabled: "Disabled",
+  unknown: "Checking…",
+  deploying: "Deploying…",
+  failed: "Deploy failed",
+  deleting: "Removing…",
+};
 
 type Form = {
   slug: string;
@@ -21,6 +29,8 @@ export default function Servers() {
   const [servers, setServers] = useState<Server[]>([]);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Server | "new" | null>(null);
+  const [hosting, setHosting] = useState(false);
+  const { features } = useSession();
   const [open, setOpen] = useState<Record<number, boolean>>({});
 
   const load = useCallback(() => api<Server[]>("/servers").then(setServers, (e) => setError(e.message)), []);
@@ -55,13 +65,17 @@ export default function Servers() {
           <p className="muted">Every enabled, connected server's tools are available through one gateway endpoint, named <code>server__tool</code>.</p>
         </div>
         {admin && (
-          <button className="primary" onClick={() => setEditing("new")}>
-            Add server
-          </button>
+          <div className="row gap">
+            {features.stores && <button onClick={() => setHosting(true)}>Deploy from image</button>}
+            <button className="primary" onClick={() => setEditing("new")}>
+              Add server by URL
+            </button>
+          </div>
         )}
       </header>
       {error && <div className="error">{error}</div>}
       {editing && <ServerForm server={editing === "new" ? null : editing} onDone={() => (setEditing(null), load())} />}
+      {hosting && <HostedForm onDone={() => (setHosting(false), load())} />}
       <div className="stack">
         {servers.map((s) => (
           <section className="card" key={s.id}>
@@ -71,6 +85,7 @@ export default function Servers() {
                   <h2>{s.name}</h2>
                   <span className={`badge status-${s.status}`}>{STATUS_LABEL[s.status]}</span>
                   {s.managed_by?.startsWith("store:") && <span className="badge">provisioned store</span>}
+                  {s.hosted && <span className="badge">hosted · {s.hosted.namespace}</span>}
                 </div>
                 <div className="muted small">
                   prefix <code>{s.slug}__</code>
@@ -83,12 +98,21 @@ export default function Servers() {
                   )}
                   {" "}· checked {fmtTime(s.checked_at)}
                 </div>
-                {s.status === "unreachable" && s.status_reason && <div className="error small">Why: {s.status_reason}</div>}
+                {s.hosted && (
+                  <div className="muted small">
+                    image <code>{s.hosted.image}</code> · port {s.hosted.port}
+                    {s.hosted.has_env && " · env from a Secret"} · egress {s.hosted.allow_egress ? "public HTTPS" : "none"}
+                  </div>
+                )}
+                {["unreachable", "failed"].includes(s.status) && s.status_reason && <div className="error small">Why: {s.status_reason}</div>}
               </div>
               {admin && (
                 <div className="row gap">
                   <button onClick={() => act(() => api(`/servers/${s.id}/refresh`, { method: "POST" }))}>Check now</button>
-                  <button onClick={() => setEditing(s)}>Edit</button>
+                  {!s.hosted && <button onClick={() => setEditing(s)}>Edit</button>}
+                  {s.hosted && s.status === "failed" && (
+                    <button onClick={() => act(() => api(`/servers/${s.id}/hosted`, { method: "PATCH", body: {} }))}>Redeploy</button>
+                  )}
                   <button onClick={() => act(() => api(`/servers/${s.id}`, { method: "PATCH", body: { enabled: !s.enabled } }))}>{s.enabled ? "Disable" : "Enable"}</button>
                   {!s.managed_by?.startsWith("store:") && (
                     <button className="danger" onClick={() => confirm(`Remove ${s.name}?`) && act(() => api(`/servers/${s.id}`, { method: "DELETE" }))}>
@@ -133,6 +157,81 @@ export default function Servers() {
         ))}
       </div>
     </>
+  );
+}
+
+function HostedForm({ onDone }: { onDone: () => void }) {
+  const [f, setF] = useState({ name: "", slug: "", image: "", port: 8000, path: "/mcp", env: "", allow_egress: false });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const env: Record<string, string> = {};
+    for (const line of f.env.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      const i = line.indexOf("=");
+      if (i < 1) {
+        setError(`env line "${line}" must look like NAME=value`);
+        setBusy(false);
+        return;
+      }
+      env[line.slice(0, i)] = line.slice(i + 1);
+    }
+    try {
+      await api("/servers/hosted", { body: { name: f.name, slug: f.slug, image: f.image, port: f.port, path: f.path, env, allow_egress: f.allow_egress } });
+      onDone();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form className="card form" onSubmit={submit}>
+      <h2>Deploy an MCP server from a container image</h2>
+      <p className="muted small">
+        The platform runs it in its own namespace <code>mcp-&lt;slug&gt;</code> as a non-root user with a read-only filesystem, CPU and memory limits, and a NetworkPolicy that only lets the gateway in. The container must serve Streamable HTTP.
+      </p>
+      <div className="grid2">
+        <label>
+          Display name
+          <input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required />
+        </label>
+        <label>
+          Tool prefix (slug)
+          <input value={f.slug} onChange={(e) => setF({ ...f, slug: e.target.value })} pattern="[a-z]([a-z0-9-]{0,18}[a-z0-9])?" required />
+        </label>
+        <label className="span2">
+          Image
+          <input value={f.image} onChange={(e) => setF({ ...f, image: e.target.value })} placeholder="ghcr.io/org/server:1.2.3" required />
+        </label>
+        <label>
+          Container port
+          <input type="number" min={1024} max={65535} value={f.port} onChange={(e) => setF({ ...f, port: Number(e.target.value) })} />
+        </label>
+        <label>
+          MCP path
+          <input value={f.path} onChange={(e) => setF({ ...f, path: e.target.value })} />
+        </label>
+        <label className="span2">
+          Environment (NAME=value per line, stored encrypted, mounted as a Secret)
+          <textarea rows={3} value={f.env} onChange={(e) => setF({ ...f, env: e.target.value })} />
+        </label>
+        <label className="row gap">
+          <input type="checkbox" checked={f.allow_egress} onChange={(e) => setF({ ...f, allow_egress: e.target.checked })} /> Allow outbound HTTPS to the internet
+        </label>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="row gap">
+        <button className="primary" disabled={busy}>
+          {busy ? "Submitting…" : "Deploy"}
+        </button>
+        <button type="button" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 

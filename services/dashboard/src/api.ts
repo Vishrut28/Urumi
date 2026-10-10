@@ -35,7 +35,7 @@ export type Server = {
   slug: string;
   name: string;
   enabled: boolean;
-  status: "connected" | "unreachable" | "disabled" | "unknown";
+  status: "connected" | "unreachable" | "disabled" | "unknown" | "deploying" | "failed" | "deleting";
   status_reason: string | null;
   checked_at: string | null;
   tools: Tool[];
@@ -46,6 +46,7 @@ export type Server = {
   has_credential?: boolean;
   timeout_seconds?: number;
   admin_only_tools?: string[];
+  hosted?: { image: string; port: number; path: string; has_env: boolean; allow_egress: boolean; namespace: string };
 };
 
 export type ApiKey = {
@@ -81,11 +82,14 @@ export type Store = {
   name: string;
   status: "provisioning" | "ready" | "failed" | "deleting";
   status_reason: string | null;
+  step: string | null;
   url: string;
   namespace: string;
   created_at: string;
+  updated_at: string;
   owner_email: string | null;
   mcp_server: string | null;
+  mcp_status: string | null;
 };
 
 export const fmtTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "—");

@@ -7,7 +7,7 @@ images:
 gateway:
   replicas: 2
   provisioner:
-    enabled: false   # flipped on once the provisioner image is built
+    enabled: true
     storeDomain: localtest.me
     storeScheme: http
 postgres:

@@ -59,8 +59,7 @@ networkPolicy:
   enabled: true
   ingressControllerNamespace: kube-system   # where Traefik runs on k3s
   gatewayNamespace: platform                # only the gateway's pods may call woo-mcp
-  gatewayPodLabels:
-    app.kubernetes.io/name: gateway
+  gatewayPodNames: [gateway, provisioner]   # app.kubernetes.io/name of pods allowed to call woo-mcp
 
 # Per-namespace guardrails, used for provisioned stores.
 guardrails:

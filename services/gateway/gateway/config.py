@@ -43,8 +43,19 @@ class Settings(BaseSettings):
     self_mcp_url: str = "http://127.0.0.1:8080/mcp"  # where the chat agent reaches this gateway's MCP endpoint
     cookie_secure: bool = False
 
-    # Multi-store provisioning (bonus); off unless the chart enables it.
+    # Multi-store provisioning and hosted MCP servers; off unless the chart enables them.
     provisioner_enabled: bool = False
+    provisioner_max_stores_per_user: int = 2
+    provisioner_timeout_seconds: int = 900
+    provisioner_store_domain: str = "localtest.me"
+    provisioner_store_scheme: str = "http"
+    provisioner_gateway_namespace: str = "platform"
+    provisioner_ingress_class: str = "traefik"
+    provisioner_store_image: str = "woo-mcp"
+    provisioner_store_image_tag: str = "dev"
+    provisioner_chart_path: str = "/charts/store"
+    provisioner_store_values_file: str = ""  # extra values for every provisioned store (e.g. TLS in prod)
+    provisioner_hosted_timeout_seconds: int = 300
 
     def require_secrets(self) -> None:
         missing = [n for n in ("session_secret", "api_key_pepper", "credentials_key") if not getattr(self, n)]

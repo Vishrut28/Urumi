@@ -54,14 +54,19 @@ gateway:
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { cpu: "1", memory: 384Mi }
+  # Multi-store provisioning and hosted MCP servers (a separate Deployment
+  # with its own service account; the gateway itself has no Kubernetes access).
   provisioner:
     enabled: false
     maxStoresPerUser: 2
     timeoutSeconds: 900
     storeDomain: localtest.me     # stores get <slug>.<storeDomain>
     storeScheme: http
-    storeValuesFile: ""           # extra values for provisioned stores (ConfigMap key)
+    storeValues: {}               # extra store-chart values for every provisioned store (e.g. TLS in prod)
     apiServerCIDR: 0.0.0.0/0      # narrow to the API server address in prod
+    resources:
+      requests: { cpu: 25m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 384Mi }
 
 dashboard:
   replicas: 1

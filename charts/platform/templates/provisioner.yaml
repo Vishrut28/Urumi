@@ -1,0 +1,197 @@
+{{- if .Values.gateway.provisioner.enabled }}
+{{- $sa := "store-provisioner" }}
+{{- $user := printf "system:serviceaccount:%s:%s" .Release.Namespace $sa }}
+# Store and hosted-server provisioner: the only workload with Kubernetes API access.
+#
+# Least privilege, in three layers:
+#  1. Cluster-wide it may only create/delete namespaces and create RoleBindings
+#     to one ClusterRole (store-namespace-admin) - it cannot read or write
+#     anything else outside the namespaces it creates.
+#  2. Inside each namespace it creates, it binds itself to store-namespace-admin
+#     (the workload kinds the store chart and hosted servers need, nothing more).
+#  3. A ValidatingAdmissionPolicy confines layer 1 to namespaces named store-* or
+#     mcp-*, so it cannot delete kube-system or grant itself rights in platform.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: store-provisioner
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["store-namespace-admin"]
+    verbs: ["bind"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: store-provisioner
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: store-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+---
+# Bound per namespace (RoleBinding), never cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: store-namespace-admin
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "persistentvolumeclaims", "resourcequotas", "limitranges", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: store-provisioner-scope
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["namespaces"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
+  matchConditions:
+    - name: is-store-provisioner
+      expression: "request.userInfo.username == '{{ $user }}'"
+  validations:
+    - expression: "request.resource.resource != 'namespaces' || request.name.startsWith('store-') || request.name.startsWith('mcp-')"
+      message: "the store provisioner may only manage namespaces named store-* or mcp-*"
+    - expression: "request.resource.resource != 'rolebindings' || ((request.namespace.startsWith('store-') || request.namespace.startsWith('mcp-')) && object.roleRef.kind == 'ClusterRole' && object.roleRef.name == 'store-namespace-admin')"
+      message: "the store provisioner may only bind store-namespace-admin inside store-* or mcp-* namespaces"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: store-provisioner-scope
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+spec:
+  policyName: store-provisioner-scope
+  validationActions: [Deny]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provisioner-store-values
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+data:
+  store-values.yaml: |
+    {{- toYaml (.Values.gateway.provisioner.storeValues | default dict) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provisioner
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: provisioner
+spec:
+  replicas: 1          # a single reconciler; restarts resume from the database
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "name" "provisioner") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "platform.labels" . | nindent 8 }}
+        app.kubernetes.io/name: provisioner
+      annotations:
+        checksum/store-values: {{ toYaml (.Values.gateway.provisioner.storeValues | default dict) | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: {{ $sa }}
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      securityContext:
+        {{- include "platform.podSecurity" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: provisioner
+          image: {{ include "platform.image" (dict "root" . "name" "gateway") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["uvicorn", "--factory", "gateway.provisioner:app", "--host", "0.0.0.0", "--port", "8081", "--no-access-log"]
+          securityContext:
+            {{- include "platform.containerSecurity" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: gateway
+          env:
+            - name: PROVISIONER_SERVICE_ACCOUNT
+              value: {{ $sa }}
+            - name: PROVISIONER_STORE_VALUES_FILE
+              value: /etc/provisioner/store-values.yaml
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password } }
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://gateway:$(POSTGRES_PASSWORD)@postgres:5432/gateway"
+            {{- range $k := list "session-secret" "api-key-pepper" "credentials-key" }}
+            - name: {{ $k | upper | replace "-" "_" }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $k }} } }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.gateway.provisioner.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: store-values, mountPath: /etc/provisioner }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - name: store-values
+          configMap:
+            name: provisioner-store-values
+{{- end }}

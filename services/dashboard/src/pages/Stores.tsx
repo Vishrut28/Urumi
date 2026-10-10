@@ -74,12 +74,24 @@ export default function Stores() {
               </td>
               <td>
                 <span className={`badge store-${s.status}`}>{LABEL[s.status]}</span>
-                {s.status_reason && <div className="muted small">{s.status_reason}</div>}
+                {s.status === "provisioning" && s.step && <div className="muted small">step: {s.step}</div>}
+                {s.status === "deleting" && s.step && <div className="muted small">step: {s.step}</div>}
+                {s.status_reason && <div className={`small ${s.status === "failed" ? "error" : "muted"}`}>{s.status_reason}</div>}
               </td>
               <td>{s.status === "ready" ? <a href={s.url} target="_blank" rel="noreferrer">{s.url}</a> : <span className="muted">{s.url}</span>}</td>
-              <td>{s.mcp_server ? <code>{s.mcp_server}__*</code> : "—"}</td>
+              <td>
+                {s.mcp_server ? <code>{s.mcp_server}__*</code> : "—"}
+                {s.mcp_status && <div className="muted small">{s.mcp_status}</div>}
+              </td>
               <td className="small">{fmtTime(s.created_at)}</td>
-              <td>{s.status !== "deleting" && <button className="danger" onClick={() => remove(s)}>Delete</button>}</td>
+              <td className="row gap">
+                {s.status === "failed" && <button onClick={() => api(`/stores/${s.id}/retry`, { method: "POST" }).then(load, (e) => setError(e.message))}>Retry</button>}
+                {s.status !== "deleting" && (
+                  <button className="danger" onClick={() => remove(s)}>
+                    Delete
+                  </button>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
