@@ -187,6 +187,8 @@ async def _run_chat(settings: Settings, user_id: int, history: list[dict[str, st
 
 async def _complete(llm: httpx.AsyncClient, settings: Settings, messages: list[dict[str, Any]], functions: list[dict[str, Any]]) -> dict[str, Any]:
     body: dict[str, Any] = {"model": settings.llm_model, "messages": messages}
+    if settings.llm_reasoning_effort:
+        body["reasoning_effort"] = settings.llm_reasoning_effort
     if functions:
         body.update(tools=functions, tool_choice="auto")
     for attempt in range(3):

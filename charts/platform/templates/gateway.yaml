@@ -15,6 +15,7 @@ data:
   SEED_SERVERS: {{ toJson $seeds | quote }}
   LLM_BASE_URL: {{ .Values.gateway.llm.baseUrl | quote }}
   LLM_MODEL: {{ .Values.gateway.llm.model | quote }}
+  LLM_REASONING_EFFORT: {{ .Values.gateway.llm.reasoningEffort | default "" | quote }}
   RATE_LIMIT_CALLS_PER_MINUTE: {{ .Values.gateway.rateLimitPerMinute | quote }}
   HEALTH_INTERVAL_SECONDS: {{ .Values.gateway.healthIntervalSeconds | quote }}
   SSRF_ALLOWED_INTERNAL_HOSTS: {{ .Values.gateway.ssrfAllowedInternalHosts | quote }}

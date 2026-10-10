@@ -284,8 +284,16 @@ class Provisioner:
                 await asyncio.sleep(3)
             else:
                 raise StepError(f"not ready after {self.s.provisioner_hosted_timeout_seconds}s ({reason})")
-            await self._update_server(server_id, hosted_state="ready", hosted_reason=None, status="unknown")
-            await self.monitor.probe(server_id)
+            # A fresh pod takes a moment to become reachable through the NetworkPolicy; keep
+            # the server out of "unreachable" for that window instead of flashing it.
+            for _ in range(10):
+                await self.monitor.probe(server_id)
+                async with self.db.session() as s:
+                    probed = await s.get(UpstreamServer, server_id)
+                if probed is None or probed.status == "connected":
+                    break
+                await asyncio.sleep(2)
+            await self._update_server(server_id, hosted_state="ready", hosted_reason=None)
             log.info("hosted server %s ready", server.slug)
         except asyncio.CancelledError:
             raise

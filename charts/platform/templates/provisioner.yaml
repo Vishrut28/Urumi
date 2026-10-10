@@ -96,11 +96,19 @@ spec:
   matchConditions:
     - name: is-store-provisioner
       expression: "request.userInfo.username == '{{ $user }}'"
+  variables:
+    # The namespace being created/deleted, or the namespace a RoleBinding lands in.
+    - name: ns
+      expression: "request.resource.resource == 'namespaces' ? (request.operation == 'CREATE' ? object : oldObject) : namespaceObject"
+    - name: ownedByProvisioner
+      expression: "has(variables.ns.metadata.labels) && 'app.kubernetes.io/managed-by' in variables.ns.metadata.labels && variables.ns.metadata.labels['app.kubernetes.io/managed-by'] == 'store-provisioner'"
   validations:
     - expression: "request.resource.resource != 'namespaces' || request.name.startsWith('store-') || request.name.startsWith('mcp-')"
       message: "the store provisioner may only manage namespaces named store-* or mcp-*"
-    - expression: "request.resource.resource != 'rolebindings' || ((request.namespace.startsWith('store-') || request.namespace.startsWith('mcp-')) && object.roleRef.kind == 'ClusterRole' && object.roleRef.name == 'store-namespace-admin')"
-      message: "the store provisioner may only bind store-namespace-admin inside store-* or mcp-* namespaces"
+    - expression: "variables.ownedByProvisioner"
+      message: "the store provisioner may only act on namespaces it created (label app.kubernetes.io/managed-by=store-provisioner); hand-installed stores such as store-main are off limits"
+    - expression: "request.resource.resource != 'rolebindings' || (object.roleRef.kind == 'ClusterRole' && object.roleRef.name == 'store-namespace-admin')"
+      message: "the store provisioner may only bind store-namespace-admin"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -28,7 +28,8 @@ gateway:
   replicas: 2                     # stateless MCP transport: any replica serves any request
   llm:
     baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-3.8-flash
+    model: gemini-3.5-flash
+    reasoningEffort: low          # "" to omit; Gemini 3.x is far faster at low
   rateLimitPerMinute: 60
   healthIntervalSeconds: 10
   ssrfAllowedInternalHosts: "*.svc.cluster.local"
