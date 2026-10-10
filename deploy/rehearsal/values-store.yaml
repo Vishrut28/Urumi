@@ -1,0 +1,9 @@
+# Layered on charts/store/values-prod.yaml for the local production rehearsal.
+store:
+  host: shop.127-0-0-1.sslip.io
+ingress:
+  tls:
+    clusterIssuer: rehearsal-ca
+images:
+  wooMcp:
+    repository: k3d-woo-registry:5050/woo-mcp

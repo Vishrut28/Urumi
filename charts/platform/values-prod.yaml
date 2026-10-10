@@ -21,6 +21,13 @@ gateway:
     enabled: true
     storeDomain: 203-0-113-10.sslip.io
     storeScheme: https
+    storeValues:            # every provisioned store gets its own certificate
+      ingress:
+        tls:
+          enabled: true
+          clusterIssuer: letsencrypt-prod
+      persistence:
+        storageClass: local-path
 postgres:
   storageClass: local-path
   size: 10Gi

@@ -10,6 +10,7 @@
 | `gateway` (×2) | Dashboard REST API, aggregated MCP endpoint, upstream health, chat agent | Postgres |
 | `dashboard` | React SPA served by unprivileged nginx | none |
 | `shipping-mcp`, `utils-mcp` | The other two upstreams | in-memory only |
+| `provisioner` | Creates and deletes stores and hosted MCP servers (only Kubernetes API client) | Postgres |
 | Postgres | Users, invites, API key hashes, upstream servers (encrypted credentials, cached tools, health), audit log | PVC |
 
 Two Helm releases (`charts/store` into `store-main`, `charts/platform` into
@@ -105,6 +106,64 @@ are reduced to the subset Gemini accepts (`$ref` inlined, `anyOf[…, null]`
 collapsed). Assistant messages are echoed back verbatim so Gemini's thought
 signatures survive multi-step tool calls. With more than 40 tools, the agent gets
 two meta-tools instead (`search_tools`, `call_tool`) so the prompt stays small.
+
+## Store provisioning (bonus) and hosted MCP servers
+
+The gateway only records intent (a `stores` row, or an upstream row with
+`hosted_image`). A separate **provisioner** Deployment reconciles it every 3 s,
+one task per store or server. It's the only workload with a Kubernetes service
+account token.
+
+```
+POST /api/stores {slug: paris}         gateway: row status=provisioning, deadline = now + 15 min
+provisioner tick ──► namespace store-paris (+ labels, + RoleBinding to store-namespace-admin)
+                 ──► Secret store-secrets (random; existing values win, so retries keep them)
+                 ──► helm upgrade --install store-paris /charts/store --wait (quota, limits, NetworkPolicies, TLS in prod)
+                 ──► upstream row shop-paris (bearer = the store's mcp-token, owner = requester)
+                 ──► probe until the gateway lists its tools ──► status=ready
+DELETE                ──► unregister (tools vanish now) ──► helm uninstall ──► delete namespace ──► delete row
+```
+
+- **Why a reconciler and not the API request itself:** creating a store takes
+  minutes and must survive restarts. Every step is idempotent. A `helm` release
+  left `pending-install` by a killed provisioner is uninstalled and installed
+  again (the store is new, so there's no data to lose). After the deadline the
+  store becomes `failed` with the step and the last error. `POST` with the same
+  slug returns the same store, and *Retry* re-queues a failed one.
+- **Why helm, with the same chart as the main store:** one definition of a
+  store, and an upgrade path for provisioned stores that is the same
+  `helm upgrade` as everything else.
+- **Tool names** are `shop-<slug>__<tool>`, so the store is visible in every
+  tool name and audit row.
+- **Hosted servers** use plain Kubernetes objects rather than a chart: Secret
+  (env), Deployment (non-root, read-only root, limits, TCP probes), Service,
+  NetworkPolicy (gateway in, DNS out, optional public HTTPS), ResourceQuota and
+  LimitRange in `mcp-<slug>`. Image pull errors are surfaced as the reason.
+
+## OAuth on the gateway
+
+`gateway/oauth.py` is a small OAuth 2.1 authorization server co-located with the
+resource server. A 401 from `/mcp` carries
+`WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource/mcp"`.
+Clients discover the issuer and register: by Client ID Metadata Document (fetched
+through the SSRF guard) or dynamic registration. They then send the browser to
+`/oauth/authorize` with PKCE S256 and `resource`. The dashboard shows a consent
+page as the signed-in user, and the code is exchanged at `/oauth/token`.
+
+Access tokens (1 h) and refresh tokens (30 d) are opaque. They're stored as HMACs
+like API keys and bound to one user and to this gateway's MCP URL (RFC 8707). The
+MCP endpoint rejects tokens issued for another resource. Refresh tokens rotate,
+and replaying an old one revokes the whole grant. The authorization response
+carries `iss` (RFC 9207). API keys remain for clients without OAuth support.
+
+## Many tools
+
+With ten upstreams, a client can see hundreds of tools. `/mcp?tools=discover`
+replaces the list with `gateway__list_servers`, `gateway__search_tools` (keyword
+ranking over names and descriptions, optionally per server) and
+`gateway__call_tool`. Search results only include tools the caller may use, and
+calls go through the same `invoke()` path (permissions, rate limit, audit). The
+chat agent uses the same pattern automatically above 40 tools.
 
 ## Replicas and scaling
 

@@ -6,33 +6,36 @@ member then uses all of them through one MCP endpoint with their own API key,
 or through a chat agent in the dashboard.
 
 ```
-                    Ingress (Traefik)
-     shop.localtest.me │         │ app.localtest.me  (/ , /api , /mcp)
-                       ▼         ▼
- ┌─ ns store-main ─────────┐   ┌─ ns platform ──────────────────────────────────┐
- │ WordPress+WooCommerce   │   │ dashboard (React, nginx)                       │
- │   │          ▲          │   │ gateway ×2 (FastAPI)                            │
- │ MariaDB      │ REST     │   │   /api  dashboard API, chat agent               │
- │ (PVC)   woo-mcp ◄───────┼───┼── /mcp  one MCP endpoint, API-key auth         │
- │ (PVC)   ClusterIP only  │   │   ├─► shipping-mcp (header credential)         │
- └─────────────────────────┘   │   ├─► utils-mcp    (no credential)             │
-                               │   └─► Postgres (users, keys, servers, audit)   │
-                               └────────────────────────────────────────────────┘
-   Claude Code / Cursor / Inspector ──Bearer mgw_…──► app.localtest.me/mcp
+                       Ingress (Traefik)
+   shop.localtest.me │  <slug>.localtest.me │      │ app.localtest.me  (/ /api /mcp /oauth /.well-known)
+                     ▼                      ▼      ▼
+ ┌─ ns store-main ────────┐ ┌─ ns store-<slug> ─┐ ┌─ ns platform ─────────────────────────────────────┐
+ │ WordPress+WooCommerce  │ │ same store chart, │ │ dashboard ×2 (React, nginx)                       │
+ │   │         ▲          │ │ quota + limits,   │ │ gateway ×2 (FastAPI)                              │
+ │ MariaDB     │ REST     │ │ own DB/PVC/Secret │ │   /api   dashboard API, chat agent (Gemini)       │
+ │ (PVC)  woo-mcp ◄───────┼─┼── woo-mcp ◄───────┼─┼── /mcp   one MCP endpoint: API key or OAuth token  │
+ │ (PVC)  ClusterIP only  │ └───────────────────┘ │   ├─► shipping-mcp, utils-mcp                     │
+ └────────────────────────┘ ┌─ ns mcp-<slug> ───┐ │   ├─► hosted servers ──────────────────────┐      │
+                            │ hosted MCP server │◄┼───┘   Postgres (users, keys, servers, audit) │      │
+                            │ (admin's image)   │ │ provisioner (only pod with K8s API access) ──┘      │
+                            └───────────────────┘ └───────────────────────────────────────────────────┘
+   Claude Code / Cursor / Inspector ──Bearer mgw_… or OAuth──► app.localtest.me/mcp
 ```
 
 | Layer | Where | Notes |
 |---|---|---|
 | Store | `charts/store` | WordPress 6.6 + WooCommerce 9.3, MariaDB 11.4, both on PVCs. A WP-CLI Job installs and configures them idempotently. |
 | WooCommerce MCP server | `services/woo-mcp` | Written for this project. Streamable HTTP. Tools: `list_products`, `create_product`, `list_orders` (with `period: today`), `get_order`, `update_order_status`, `get_store_info`. |
-| Gateway + dashboard | `services/gateway`, `services/dashboard`, `charts/platform` | MCP client of every registered server and MCP server for all of them. Users, roles, hashed API keys, encrypted upstream credentials, audit log, metrics. |
+| Gateway + dashboard | `services/gateway`, `services/dashboard`, `charts/platform` | MCP client of every registered server and MCP server for all of them. Users, roles, hashed API keys, encrypted upstream credentials, per-tool permissions, audit log, metrics, OAuth 2.1 login, discover mode for large tool sets. |
 | Chat agent | `services/gateway/gateway/chat.py` | Gemini tool loop. It is an MCP client of the gateway's own `/mcp`, acting as the logged-in user. |
 | Other upstreams | `services/shipping-mcp`, `services/utils-mcp` | Shipping quotes and shipments (it has a `get_order` that collides with WooCommerce's), plus currency, time and arithmetic. |
+| Provisioner | `services/gateway/gateway/provisioner.py`, `charts/platform/templates/provisioner.yaml` | Creates and deletes stores (bonus) and hosted MCP servers. It is the only workload allowed to call the Kubernetes API, and an admission policy confines it to namespaces it created. |
 
 More detail:
 - [System design and tradeoffs](docs/design.md)
 - [Threat model](docs/threat-model.md)
-- [Stand-out items attempted](docs/standout.md)
+- [Bonus and stand-out items, with evidence](docs/standout.md)
+- [Demo video script](docs/demo-script.md)
 
 ---
 
@@ -137,12 +140,54 @@ The client sees `woocommerce__list_orders`, `shipping__get_order`,
 *"What did today's orders add up to in EUR?"* (calls `woocommerce__list_orders`
 and then `utilities__convert_currency`).
 
+**Sign in with a browser instead of a key (OAuth).** Add the server without a
+header (`claude mcp add --transport http team-gateway http://app.localtest.me/mcp`)
+and authenticate when the client asks. The gateway's 401 points the client to
+its OAuth metadata. The client registers itself, your browser opens the
+dashboard's consent page, and the client gets a short-lived token bound to your
+user. Connected apps are listed, and can be disconnected, under **API keys**.
+
+**Hundreds of tools?** Use `http://app.localtest.me/mcp?tools=discover` (or the
+header `X-MCP-Tool-Mode: discover`). The client then sees three tools,
+`gateway__list_servers`, `gateway__search_tools` and `gateway__call_tool`,
+instead of every schema. Permissions and audit apply exactly as before.
+
 ### Chat agent (as user A)
 On **Chat**, ask *"Create a product called Gateway Mug priced at 14.50"*. It then
 appears on the storefront. Place an order for it by hand, then ask *"What orders
 came in today?"*. Each answer lists the tool calls the agent made, with
 arguments and results. The calls appear in the audit log under your user with
 source `chat`.
+
+### Stores: create and delete from the dashboard (bonus)
+On **Stores**, create a store with a name and slug (for example `paris`). The
+provisioner then:
+1. creates namespace `store-paris` with a ResourceQuota and LimitRange;
+2. generates its Secrets;
+3. installs the same store chart as the main store (its own MariaDB, PVCs and
+   `http://paris.localtest.me` Ingress host);
+4. registers its woo-mcp in the gateway as `shop-paris`;
+5. marks the store **Ready** only once the gateway can list its tools.
+
+Several stores can be provisioned at once, up to 2 per user
+(`gateway.provisioner.maxStoresPerUser`), with a 15-minute deadline per store.
+Creating a store again with the same slug returns the same store. A failed store
+can be retried. If the provisioner restarts mid-install, it finishes the store or
+fails it with the step and reason.
+
+Ask the chat agent *"Compare today's orders across the Berlin and Paris stores"*:
+it calls `shop-berlin__list_orders` and `shop-paris__list_orders`. **Delete**
+removes the MCP registration first, so the tools disappear at once. It then
+uninstalls the release and deletes the namespace, with its volumes and Secrets.
+The store's owner may use the store's write tools, which are otherwise admin-only.
+
+### Hosted MCP servers (admins)
+**Servers → Deploy from image** runs an MCP server from a container image in its
+own namespace `mcp-<slug>`. It gets env values as a Secret (stored encrypted in
+the gateway), a non-root read-only container with CPU and memory limits, a
+quota, and a NetworkPolicy that lets only the gateway in, with no outbound access
+unless you allow HTTPS. A bad image shows the pull error as the reason. Removing
+the server deletes the namespace.
 
 ---
 
@@ -179,7 +224,35 @@ What changes between local and production, all through values:
 | Resources | small requests | larger requests and limits for WordPress/MariaDB |
 | Secrets | `scripts/secrets.sh` (random) | same script, or create the same Secret names from a secret manager (External Secrets, Sealed Secrets) |
 
+### Rehearsing production locally
+
+`scripts/prod-rehearsal.sh` installs both charts with `values-prod.yaml` on a second
+local k3s cluster (`woo-prod`). That means HTTPS through cert-manager, `Secure`
+cookies, images pulled from a registry, and TLS for provisioned stores. It adds
+`deploy/rehearsal/*.yaml` only for the three things a laptop can't have:
+
+| Production | Rehearsal |
+|---|---|
+| public DNS names | `*.127-0-0-1.sslip.io`, which resolve to this machine |
+| a public registry (GHCR) | a local k3d registry |
+| Let's Encrypt | a private CA ClusterIssuer (same cert-manager flow) |
+
+Measured: cert-manager issued every certificate (including one for a store
+provisioned there), all images came from the registry, and the smoke test
+passed 18/18 over HTTPS against the CA. Run `scripts/prod-rehearsal.sh stop` to
+switch back to the dev cluster (`up` starts the rehearsal again), or `down` to
+delete it.
+
 ### Upgrades and rollback
+
+`scripts/upgrade-rollback-demo.sh` runs the whole cycle on the dev cluster while
+probing the gateway twice a second:
+1. upgrade every image to a new tag;
+2. `helm rollback`;
+3. a deliberately broken upgrade (`--atomic`) that Helm rolls back by itself.
+
+Measured: 0 failed requests out of 402. That relies on a `preStop` drain and
+`maxUnavailable: 0`; without them, 5 of 417 requests failed.
 
 Every component is a Helm release, so upgrades and rollbacks use Helm's own history:
 
@@ -209,13 +282,21 @@ helm rollback platform <REVISION> -n platform --wait
 
 ```bash
 cd services/woo-mcp && python -m pytest -q    # OAuth 1.0a signing vs a port of WooCommerce's PHP verifier, tools
-cd services/gateway && python -m pytest -q    # SSRF guard, naming, tokens, and an end-to-end run of the DoD control flow
+cd services/gateway && python -m pytest -q    # 27 tests: units, provisioner lifecycle, end-to-end flows
 ```
 
-The gateway's end-to-end test starts the real upstream servers, the gateway and a
-fake LLM over HTTP, then drives them with real MCP clients. It checks namespacing
-and collisions, that members can't see admin-only tools, key revocation, disabling
-a server, a dead upstream, audit attribution, and the chat loop acting as the user.
+The gateway's end-to-end tests start the real upstream servers, the gateway and a
+fake LLM over HTTP, then drive them with real MCP clients. They cover:
+- namespacing and collisions, and members not seeing admin-only tools;
+- key revocation, disabling a server, a dead upstream, and audit attribution;
+- the chat loop acting as the user;
+- the full OAuth flow (discovery, registration, PKCE, consent, refresh rotation
+  with replay detection, audience binding);
+- discover mode, and the store API's idempotency, limits and scoping.
+
+The provisioner tests use a fake Kubernetes API and a fake helm. They cover
+recovery from a restart mid-install, deadline failures with a reason, teardown,
+and hosted-server isolation.
 
 ### Smoke test against the running cluster
 
@@ -243,6 +324,7 @@ working. Scale it back to 1 and it reconnects on the next health sweep.
 
 Built with Claude Code (Claude Opus 5.5) working with me. The code, charts and
 docs were written in that collaboration. They were verified by the unit and
-end-to-end tests above, and by the smoke test, kill-pod check and NetworkPolicy
-check on a local k3d cluster (k3s v1.35). The production values have not yet been
-run on a real VPS.
+end-to-end tests above; by the smoke test, kill-pod, NetworkPolicy, RBAC,
+provisioning, OAuth and upgrade/rollback checks on a local k3d cluster
+(k3s v1.35); and by the production-values rehearsal over HTTPS on a second k3s
+cluster. The production values have not yet been run on a real VPS.

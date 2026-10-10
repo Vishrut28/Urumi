@@ -8,3 +8,4 @@ dist/
 .env
 *.local.yaml
 secrets/
+deploy/rehearsal/ca.crt

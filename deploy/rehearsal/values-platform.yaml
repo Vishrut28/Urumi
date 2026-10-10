@@ -1,0 +1,16 @@
+# Layered on charts/platform/values-prod.yaml for the local production rehearsal.
+# Only what cannot be real on a laptop: public DNS names, a public registry, Let's Encrypt.
+publicHost: app.127-0-0-1.sslip.io
+ingress:
+  tls:
+    clusterIssuer: rehearsal-ca
+images:
+  registry: k3d-woo-registry:5050/
+gateway:
+  provisioner:
+    storeDomain: 127-0-0-1.sslip.io
+    storeValues:
+      ingress:
+        tls:
+          enabled: true
+          clusterIssuer: rehearsal-ca
