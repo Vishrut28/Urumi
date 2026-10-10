@@ -22,6 +22,8 @@ metadata:
     app.kubernetes.io/name: dashboard
 spec:
   replicas: {{ .Values.dashboard.replicas }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels:
       {{- include "platform.selector" (dict "root" . "name" "dashboard") | nindent 6 }}
@@ -37,6 +39,7 @@ spec:
         {{- include "platform.podSecurity" . | nindent 8 }}
         runAsUser: 101
         runAsGroup: 101
+      terminationGracePeriodSeconds: 30
       containers:
         - name: dashboard
           image: {{ include "platform.image" (dict "root" . "name" "dashboard") }}
@@ -48,7 +51,11 @@ spec:
               containerPort: 8080
           readinessProbe:
             httpGet: { path: /healthz, port: http }
-            periodSeconds: 10
+            periodSeconds: 5
+          lifecycle:
+            preStop:   # keep serving while the endpoint is removed from Traefik, then shut down
+              exec:
+                command: ["sleep", "8"]
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 20

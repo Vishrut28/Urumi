@@ -86,6 +86,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     {{- include "platform.selector" (dict "root" . "name" "gateway") | nindent 20 }}
+      terminationGracePeriodSeconds: 30
       containers:
         - name: gateway
           image: {{ include "platform.image" (dict "root" . "name" "gateway") }}
@@ -117,7 +118,11 @@ spec:
             {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
-            periodSeconds: 10
+            periodSeconds: 5
+          lifecycle:
+            preStop:   # keep serving while the endpoint is removed from Traefik, then shut down
+              exec:
+                command: ["sleep", "8"]
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 15
