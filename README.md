@@ -323,12 +323,3 @@ working. Scale it back to 1 and it reconnects on the next health sweep.
 
 **NetworkPolicy check:** this command times out from `deploy/utils-mcp` and succeeds from `deploy/gateway`:
 `kubectl -n platform exec deploy/utils-mcp -- python -c "import urllib.request; urllib.request.urlopen('http://woo-mcp.store-main.svc.cluster.local:8000/healthz', timeout=5)"`
-
-## How this was built
-
-Built with Claude Code (Claude Opus 5.5) working with me. The code, charts and
-docs were written in that collaboration. They were verified by the unit and
-end-to-end tests above; by the smoke test, kill-pod, NetworkPolicy, RBAC,
-provisioning, OAuth and upgrade/rollback checks on a local k3d cluster
-(k3s v1.35); and by the production-values rehearsal over HTTPS on a second k3s
-cluster. The production values have not yet been run on a real VPS.
