@@ -54,7 +54,11 @@ sudo snap install kubectl --classic
 Get a free Gemini API key at https://aistudio.google.com/apikey. The free tier is
 rate-limited and never billed.
 
-Then, from the repo root:
+Then clone the repo and, from its root, bring everything up:
+
+```bash
+git clone https://github.com/Vishrut28/Urumi.git && cd Urumi
+```
 
 ```bash
 GEMINI_API_KEY=your-key scripts/local-up.sh
